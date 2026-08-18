@@ -1,0 +1,68 @@
+{
+  "log": {"level": "info"},
+  "dns": {
+    "servers": [
+      {"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "auto"},
+      {"type": "local", "tag": "local", "detour": "direct"}
+    ],
+    "rules": [
+      {"outbound": "any", "server": "local"}
+    ],
+    "final": "remote",
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    {
+      "type": "tun", "tag": "tun-in",
+      "address": ["172.19.0.1/30"],
+      "mtu": 1500, "auto_route": true, "strict_route": false,
+      "stack": "system"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "urltest", "tag": "auto",
+      "outbounds": ["grpc", "httpupgrade", "vless"],
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "30s", "tolerance": 50
+    },
+    {
+      "type": "vless", "tag": "grpc",
+      "server": "YOUR_VPS_IP", "server_port": 30843,
+      "uuid": "YOUR_UUID",
+      "tls": {"enabled": true, "server_name": "YOUR_DOMAIN", "utls": {"enabled": true, "fingerprint": "firefox"}},
+      "transport": {"type": "grpc", "service_name": "snowden"}
+    },
+    {
+      "type": "vless", "tag": "httpupgrade",
+      "server": "YOUR_VPS_IP", "server_port": 20843,
+      "uuid": "YOUR_UUID",
+      "tls": {"enabled": true, "server_name": "YOUR_DOMAIN", "utls": {"enabled": true, "fingerprint": "firefox"}},
+      "transport": {"type": "httpupgrade", "path": "/snowden", "headers": {"Host": "YOUR_DOMAIN"}}
+    },
+    {
+      "type": "vless", "tag": "vless",
+      "server": "YOUR_VPS_IP", "server_port": 443,
+      "uuid": "YOUR_UUID",
+      "tls": {"enabled": true, "server_name": "YOUR_DOMAIN", "utls": {"enabled": true, "fingerprint": "firefox"}}
+    },
+    {"type": "direct", "tag": "direct"},
+    {"type": "block", "tag": "block"}
+  ],
+  "route": {
+    "rules": [
+      {"action": "sniff"},
+      {"domain_suffix": [".ru", ".su", ".рф"], "action": "direct"},
+      {"domain": ["yandex.ru","ya.ru","vk.com","mail.ru","ok.ru","gosuslugi.ru","sberbank.ru","sber.ru","tinkoff.ru","vtb.ru","alfabank.ru","passport.yandex.ru"],
+        "action": "direct"},
+      {"domain_suffix": ["googlevideo.com","youtube.com","youtu.be","gstatic.com","discord.com","openai.com","claude.ai","twitter.com","x.com","instagram.com"],
+        "outbound": "auto"},
+      {"domain": ["t.me","telegram.org"], "outbound": "auto"},
+      {"ip_cidr": ["91.108.0.0/16","149.154.0.0/16"], "outbound": "auto"},
+      {"ip_is_private": true, "action": "direct"}
+    ],
+    "final": "auto",
+    "default_domain_resolver": "local",
+    "auto_detect_interface": true
+  }
+}

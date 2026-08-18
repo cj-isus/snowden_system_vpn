@@ -1,0 +1,7 @@
+{
+  "_comment": "Snowden System VPS config — copy to server-params.json and fill in your values",
+  "domain": "your-domain.nip.io",
+  "uuid": "YOUR-UUID-HERE",
+  "hy2_pass": "YOUR-HYSTERIA2-PASSWORD",
+  "ss_pass": "YOUR-SHADOWSOCKS-PASSWORD"
+}

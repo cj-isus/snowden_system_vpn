@@ -1,0 +1,560 @@
+<h2>snowden.system — Android: техническая документация</h2>
+<div class="note">Версия: 1.0.0 · sing-box-lx 1.14.0-lx.3 · Flutter 3.x · Kotlin · minSdk 23</div>
+<p>Документ описывает, <strong>как</strong> работает Android-клиент и <strong>почему</strong> принят именно такой</p>
+<p>архитектурный подход. Каждое решение обосновано конкретной проблемой, с которой</p>
+<p>мы столкнулись при отладке на реальном устройстве (Honor PTP-N49 / HarmonyOS 6).</p>
+<hr>
+<h3>1. Архитектура одним взглядом</h3>
+<pre><code>┌─────────────────────────────────────────────────────────────┐
+│  Flutter UI (lib/main.dart)                                 │
+│  ┌───────────────┐   MethodChannel &#x27;snowden.system/vpn&#x27;     │
+│  │  Кнопка ВКЛ   │ ─────────────────────────────────────┐   │
+│  │  Панель логов │ ◄────────── onLog (binaryMessenger)  │   │
+│  └───────────────┘                                      │   │
+└──────────────────────────────────────────────────────────┼───┘
+                          │ startVpn(config)               │
+                          ▼                                │
+┌──────────────────────────────────────────────────────────┼───┐
+│  MainActivity.kt (FlutterActivity)                       │   │
+│  · VpnService.prepare() → запрос разрешения              │   │
+│  · startForegroundService(SnowdenVpnService, config)     │   │
+│  · binaryMessenger (static) — мост к Flutter UI ◄────────┘   │
+└──────────────────────────────────────────────────────────────┘
+                          │ Intent(ACTION_START, config)
+                          ▼
+┌────────────────────────────────────────────────────────────────┐
+│  SnowdenVpnService.kt (VpnService)                             │
+│                                                                │
+│  ┌─ Libbox.setup(setupOpts) ── setFixAndroidStack(true)        │
+│  ├─ CommandServer(handler, platform).start()                   │
+│  ├─ CommandClient(CommandLog) → ядровые логи во Flutter        │
+│  ├─ startOrReloadService(configJson, OverrideOptions)          │
+│  │                                                              │
+│  │  SnowdenPlatformInterface (PlatformInterface):               │
+│  │  ├─ openTun() → VpnService.Builder → ParcelFileDescriptor   │
+│  │  ├─ autoDetectInterfaceControl(fd) → service.protect(fd)    │
+│  │  ├─ startDefaultInterfaceMonitor → updateDefaultInterface   │
+│  │  └─ getInterfaces() → java.net.NetworkInterface enumeration │
+│  │                                                              │
+│  └─ tunFd (поле класса — защита от GC)                         │
+└────────────────────────────────────────────────────────────────┘
+                          │ fd (TUN)
+                          ▼
+┌────────────────────────────────────────────────────────────────┐
+│  sing-box ядро (libbox.so, native)                             │
+│                                                                │
+│  TUN inbound (172.19.0.1/30, stack=system)                     │
+│       │                                                        │
+│       ▼                                                        │
+│  Маршрутизатор (route rules):                                  │
+│  · sniff → hijack-dns (только DNS)                             │
+│  · .ru/.su/.рф + банки/Госуслуги/ВК → direct (мимо VPN)        │
+│  · Telegram IP 91.108.0.0/16, 149.154.0.0/16 → auto (VPN)      │
+│  · YouTube/Discord/AI/соцсети → auto (VPN)                     │
+│  · private IP → direct                                         │
+│  · final → auto (urltest: VLESS + Hysteria2)                   │
+│       │                                                        │
+│       ▼                                                        │
+│  VLESS+TLS (89.125.1.217:443) — основной канал              │
+│  Hysteria2 (89.125.1.217:8443/UDP) — резерв (UDP режется)   │
+└────────────────────────────────────────────────────────────────┘</code></pre>
+<hr>
+<h3>2. Стек технологий и почему именно он</h3>
+<p>| Слой | Технология | Почему не альтернатива |</p>
+<p>|------|------------|------------------------|</p>
+<p>| <strong>UI</strong> | Flutter (Dart) | Один код для Android+iOS; быстрее нативной разработки UI; Material 3 из коробки. Нативный Kotlin UI потребовал бы в 3-5 раз больше кода для того же интерфейса. |</p>
+<p>| <strong>Ядро VPN</strong> | sing-box-lx 1.14.0-lx.3 через libbox.aar | Единое ядро с ПК-версией (Wails). lx-форк добавляет AmneziaWG 2.0, MASQUE, XHTTP. Альтернативы (Xray-core, v2ray) не имеют готового AAR и PlatformInterface под Android. |</p>
+<p>| <strong>Мост Kotlin↔Go</strong> | gomobile (libbox.aar) | libbox экспортирует Go-классы как Java-интерфейсы через gomobile binding. Это позволяет вызывать sing-box как библиотеку, а не subprocess — корректная очистка ресурсов и логирование. |</p>
+<p>| <strong>VPN-интерфейс</strong> | Android VpnService API | Единственный способ поднять TUN без root. VpnService.Builder создаёт ParcelFileDescriptor, который sing-box читает/пишет как TUN. |</p>
+<p>| <strong>TUN стек</strong> | <code>stack: "system"</code> | gVisor вызывал SIGSEGV (native crash) в libbox.so на HarmonyOS. System-стек использует ядерный TCP/IP напрямую через <code>setFixAndroidStack(true)</code>. |</p>
+<hr>
+<h3>3. Ключевые архитектурные решения (и почему)</h3>
+<h4>3.1. Почему sing-box встроен как библиотека, а не subprocess</h4>
+<p><strong>Проблема:</strong> На ПК мы пробовали запускать sing-box как отдельный процесс. На Windows это создавало проблемы с завершением (зомби-процессы, зависшие TUN).</p>
+<p><strong>Решение:</strong> На Android sing-box встроен через <code>box.New().Start()/Close()</code> (через libbox <code>startOrReloadService</code>). Ядро работает в том же процессе, что и VpnService.</p>
+<p><strong>Почему:</strong> VpnService предоставляет fd TUN только в контексте своего процесса. Если sing-box в subprocess — пришлось бы пробрасывать fd через UNIX-domain сокет, что усложняет код и нестабильно. Плюс CommandClient для логов работает только внутри процесса.</p>
+<hr>
+<h4>3.2. Почему `setFixAndroidStack(true)` — критично</h4>
+<p><strong>Проблема:</strong> TUN с <code>stack: "system"</code> на Android требует особой обработки netlink-сокетов. Без <code>FixAndroidStack</code> sing-box не может корректно читать/писать в TUN fd.</p>
+<pre><code>val setupOpts = SetupOptions()
+setupOpts.setFixAndroidStack(true)  // ← КРИТИЧНО
+Libbox.setup(setupOpts)</code></pre>
+<p><strong>Почему:</strong> Go-рантайм на Android использует MTE (Memory Tagging) и PAC (Pointer Authentication). <code>FixAndroidStack</code> настраивает Go-рантайм на корректную работу с tagged pointers при системных вызовах к TUN. Без этого — silent corruption или SIGSEGV.</p>
+<hr>
+<h4>3.3. Почему `getInterfaces()` нельзя оставлять пустым</h4>
+<p><strong>Симптом:</strong> <code>outbound vless unavailable: no available network interface</code> — все outbounds падали, трафик не шёл, хотя TUN был поднят.</p>
+<p><strong>Причина:</strong> sing-box <code>NetworkManager</code> вызывает <code>PlatformInterface.getInterfaces()</code> для получения списка физических интерфейсов (wlan0, rmnet_data2). Если метод выбрасывает <code>UnsupportedOperationException</code>, NetworkManager получает пустой список → не может найти интерфейс для исходящего соединения к VPS → outbound недоступен.</p>
+<p><strong>Решение:</strong> Реализовали перечисление через <code>java.net.NetworkInterface.getNetworkInterfaces()</code>:</p>
+<pre><code>override fun getInterfaces(): NetworkInterfaceIterator {
+    return AndroidNetworkInterfaceIterator(service)
+}</code></pre>
+<p>Каждый интерфейс возвращает:</p>
+<ul>
+<li>`name` — "rmnet_data2", "wlan2"</li>
+<li>`addresses` — **с prefix length** (`10.65.83.35/29`), иначе Go panic → SIGABRT</li>
+<li>`type` — WIFI / Cellular / Other (через `Libbox.InterfaceTypeWIFI` и т.д.)</li>
+</ul>
+<p><strong>Почему с prefix length:</strong> Go-side парсит адреса через <code>netip.ParsePrefix()</code>. Строка <code>"10.65.83.35"</code> без <code>/29</code> вызывает panic в Go-рантайме → SIGABRT → краш всего процесса. Это заняло 2 часа дебага, пока мы не увидели tombstone.</p>
+<hr>
+<h4>3.4. Почему `startDefaultInterfaceMonitor` + `updateDefaultInterface` обязательны</h4>
+<p><strong>Симптом:</strong> TUN поднят, трафик попадает в туннель, но <code>protect()</code> никогда не вызывается → соединения к VPS уходят в TUN → бесконечная петля → нет интернета.</p>
+<p><strong>Причина:</strong> sing-box должен знать имя активного сетевого интерфейса (например, <code>rmnet_data2</code> для LTE), чтобы:</p>
+<ol>
+<li>Привязывать outbound-сокеты к этому интерфейсу</li>
+<li>Вызывать `autoDetectInterfaceControl(fd)` для каждого нового сокета</li>
+<li>`autoDetectInterfaceControl` → наш `service.protect(fd)` — защищает сокет от попадания в TUN</li>
+</ol>
+<p><strong>Решение:</strong> При старте определяем активный интерфейс через <code>ConnectivityManager</code>:</p>
+<pre><code>private fun detectDefaultInterface() {
+    val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    val active = cm.activeNetwork
+    val lp = cm.getLinkProperties(active)
+    defaultInterfaceName = lp?.interfaceName ?: &quot;&quot;  // &quot;rmnet_data2&quot;
+}</code></pre>
+<p>Затем при вызове <code>startDefaultInterfaceMonitor(listener)</code> сразу уведомляем sing-box:</p>
+<pre><code>listener.updateDefaultInterface(defaultInterfaceName, 0, false, true)</code></pre>
+<p><strong>Почему это работает:</strong> После уведомления sing-box начинает вызывать <code>autoDetectInterfaceControl(fd)</code> для каждого outbound-сокета → наш <code>protect()</code> срабатывает → сокет к VPS (89.125.1.217:443) уходит через физический интерфейс, а не через TUN → петля разорвана → интернет работает.</p>
+<hr>
+<h4>3.5. Почему `addDisallowedApplication` для собственного приложения</h4>
+<pre><code>builder.addDisallowedApplication(&quot;com.snowden.system.snowden_android&quot;)</code></pre>
+<p><strong>Проблема:</strong> Без этого sing-box пытается отправить свой собственный трафик к VPS через TUN → петля.</p>
+<p><strong>Двойная защита:</strong> <code>protect()</code> (вызывается sing-box) + <code>addDisallowedApplication</code> (на уровне VpnService.Builder). Даже если <code>protect()</code> по какой-то причине не сработает, приложение исключено из VPN на системном уровне.</p>
+<hr>
+<h4>3.6. Почему `auto_route: false` + ручной `addRoute("0.0.0.0", 0)`</h4>
+<p><strong>Проблема:</strong> <code>auto_route: true</code> в sing-box пытается изменить таблицу маршрутизации через <code>ip route</code>, что на Android без root невозможно.</p>
+<p><strong>Решение:</strong></p>
+<ul>
+<li>`auto_route: false` в конфиге TUN</li>
+<li>Вручную `builder.addRoute("0.0.0.0", 0)` в `openTun()` — это делает VpnService API корректно, через Android framework, а не через netlink.</li>
+</ul>
+<pre><code>builder.addRoute(&quot;0.0.0.0&quot;, 0)  // захватываем ВЕСЬ IPv4 трафик</code></pre>
+<p><strong>Почему OverrideOptions.autoRedirect = false:</strong> lx-форк добавил autoRedirect, который пытается использовать iptables REDIRECT — требует root. Отключаем:</p>
+<pre><code>override.setAutoRedirect(false)</code></pre>
+<hr>
+<h4>3.7. Почему ParcelFileDescriptor хранится в поле класса</h4>
+<pre><code>private var tunFd: ParcelFileDescriptor? = null
+// ...
+service.tunFd = pfd  // в openTun()</code></pre>
+<p><strong>Проблема:</strong> Если PFD будет собран GC, Android закроет TUN fd → sing-box получит EBADF → трафик остановится.</p>
+<p><strong>Решение:</strong> Держим сильную ссылку в поле класса <code>SnowdenVpnService</code>. Пока сервис жив — PFD не будет собран.</p>
+<hr>
+<h4>3.8. Почему `stack: "system"`, а не `"gvisor"`</h4>
+<p><strong>Проблема:</strong> gVisor (userspace TCP/IP) вызывал SIGSEGV в libbox.so на Honor PTP-N49 (HarmonyOS 6, ARM64 с MTE).</p>
+<p><strong>Решение:</strong> <code>stack: "system"</code> использует ядерный TCP/IP стек через <code>/dev/tun</code> + <code>setFixAndroidStack(true)</code>.</p>
+<p><strong>Компромисс:</strong> System-стек требует корректной работы <code>protect()</code> (gVisor не нуждается в protect, т.к. обрабатывает TCP в userspace). Но зато нет крашей.</p>
+<hr>
+<h3>4. Раздельное туннелирование (Split Tunneling)</h3>
+<h4>Логика маршрутизации</h4>
+<pre><code>Трафик приложения
+    │
+    ▼
+[TUN 172.19.0.1/30] ── весь трафик попадает сюда
+    │
+    ▼
+Правило 1: sniff (определить протокол/домен по SNI)
+    │
+    ▼
+Правило 2: hijack-dns (ТОЛЬКО для DNS-портов — перехват DNS)
+    │
+    ▼
+Правило 3: domain_suffix .ru/.su/.рф → DIRECT (мимо VPN)
+    │      └─ Сбер, Тинькофф, ВТБ, Альфа, Госуслуги, ВК, Яндекс...
+    ▼
+Правило 4: Telegram IP (91.108.0.0/16, 149.154.0.0/16) → VPN
+    │      └─ Telegram использует MTProto, подключается по IP напрямую
+    ▼
+Правило 5: YouTube/Discord/AI/соцсети → VPN
+    │
+    ▼
+Правило 6: private IP (10.x, 192.168.x, 172.16-31.x) → DIRECT
+    │
+    ▼
+Правило 7 (final): всё остальное → auto (urltest: VLESS/Hysteria2)</code></pre>
+<h4>Почему именно так</h4>
+<p>| Категория | Маршрут | Причина |</p>
+<p>|-----------|---------|---------|</p>
+<p>| <strong>Российские банки</strong> | direct | Блокируют зарубежные IP (антифрод). Через VPN = отказ входа. |</p>
+<p>| <strong>Госуслуги</strong> | direct | Не пускают с иностранных IP; напрямую работают быстрее. |</p>
+<p>| <strong>ВК, Яндекс, Mail.ru</strong> | direct | Доступны в РФ напрямую, нет смысла тратить VPN-трафик. |</p>
+<p>| <strong>Telegram</strong> | VPN | Заблокирован ТСПУ. IP зашиты в приложении (MTProto). |</p>
+<p>| <strong>YouTube</strong> | VPN | Заблокирован (замедление ТСПУ с 2024). |</p>
+<p>| <strong>Discord, Instagram, X</strong> | VPN | Заблокированы Роскомнадзором. |</p>
+<p>| <strong>Локальная сеть</strong> | direct | Принтеры, NAS, умный дом — не должны идти через VPS. |</p>
+<h4>Почему `protocol: "dns"` в hijack-dns критично</h4>
+<p><strong>Ошибкa (было):</strong> <code>{"action": "hijack-dns"}</code> без матчера → <strong>весь трафик</strong> перехватывался как DNS → соединения зависали.</p>
+<p><strong>Правильно:</strong> <code>{"protocol": "dns", "action": "hijack-dns"}</code> → перехватываются только реальные DNS-запросы (UDP/TCP порт 53), остальное идёт дальше по правилам.</p>
+<hr>
+<h3>5. Конфигурация sing-box (полный конфиг)</h3>
+<pre><code>{
+  &quot;log&quot;: {&quot;level&quot;: &quot;debug&quot;},
+  &quot;dns&quot;: {
+    &quot;servers&quot;: [
+      {&quot;type&quot;: &quot;https&quot;, &quot;tag&quot;: &quot;remote&quot;, &quot;server&quot;: &quot;1.1.1.1&quot;, &quot;detour&quot;: &quot;auto&quot;},
+      {&quot;type&quot;: &quot;local&quot;, &quot;tag&quot;: &quot;local&quot;, &quot;detour&quot;: &quot;direct&quot;}
+    ],
+    &quot;rules&quot;: [{&quot;outbound&quot;: &quot;any&quot;, &quot;server&quot;: &quot;local&quot;}],
+    &quot;final&quot;: &quot;remote&quot;,
+    &quot;strategy&quot;: &quot;ipv4_only&quot;
+  },
+  &quot;inbounds&quot;: [
+    {
+      &quot;type&quot;: &quot;tun&quot;, &quot;tag&quot;: &quot;tun-in&quot;,
+      &quot;address&quot;: [&quot;172.19.0.1/30&quot;],
+      &quot;mtu&quot;: 1500,
+      &quot;auto_route&quot;: false,
+      &quot;strict_route&quot;: false,
+      &quot;stack&quot;: &quot;system&quot;
+    }
+  ],
+  &quot;outbounds&quot;: [
+    {
+      &quot;type&quot;: &quot;urltest&quot;, &quot;tag&quot;: &quot;auto&quot;,
+      &quot;outbounds&quot;: [&quot;vless&quot;, &quot;hysteria2&quot;],
+      &quot;url&quot;: &quot;https://www.gstatic.com/generate_204&quot;,
+      &quot;interval&quot;: &quot;30s&quot;, &quot;tolerance&quot;: 50
+    },
+    {
+      &quot;type&quot;: &quot;vless&quot;, &quot;tag&quot;: &quot;vless&quot;,
+      &quot;server&quot;: &quot;89.125.1.217&quot;, &quot;server_port&quot;: 443,
+      &quot;uuid&quot;: &quot;***&quot;,
+      &quot;tls&quot;: {&quot;enabled&quot;: true, &quot;server_name&quot;: &quot;snowden-system.192-109-206-234.nip.io&quot;}
+    },
+    {
+      &quot;type&quot;: &quot;hysteria2&quot;, &quot;tag&quot;: &quot;hysteria2&quot;,
+      &quot;server&quot;: &quot;89.125.1.217&quot;, &quot;server_port&quot;: 8443,
+      &quot;password&quot;: &quot;***&quot;,
+      &quot;tls&quot;: {&quot;enabled&quot;: true, &quot;server_name&quot;: &quot;snowden-system.192-109-206-234.nip.io&quot;}
+    },
+    {&quot;type&quot;: &quot;direct&quot;, &quot;tag&quot;: &quot;direct&quot;},
+    {&quot;type&quot;: &quot;block&quot;, &quot;tag&quot;: &quot;block&quot;}
+  ],
+  &quot;route&quot;: {
+    &quot;rules&quot;: [
+      {&quot;action&quot;: &quot;sniff&quot;},
+      {&quot;protocol&quot;: &quot;dns&quot;, &quot;action&quot;: &quot;hijack-dns&quot;},
+      {&quot;domain_suffix&quot;: [&quot;.ru&quot;, &quot;.su&quot;, &quot;.рф&quot;], &quot;action&quot;: &quot;direct&quot;},
+      {&quot;domain&quot;: [&quot;...банки, Госуслуги, ВК...&quot;], &quot;action&quot;: &quot;direct&quot;},
+      {&quot;domain_suffix&quot;: [&quot;...YouTube, Discord...&quot;], &quot;action&quot;: &quot;auto&quot;},
+      {&quot;domain&quot;: [&quot;t.me&quot;, &quot;telegram.org&quot;], &quot;action&quot;: &quot;auto&quot;},
+      {&quot;ip_cidr&quot;: [&quot;91.108.0.0/16&quot;, &quot;149.154.0.0/16&quot;], &quot;action&quot;: &quot;auto&quot;},
+      {&quot;ip_is_private&quot;: true, &quot;action&quot;: &quot;direct&quot;}
+    ],
+    &quot;final&quot;: &quot;auto&quot;,
+    &quot;default_domain_resolver&quot;: &quot;local&quot;,
+    &quot;auto_detect_interface&quot;: true
+  }
+}</code></pre>
+<h4>Почему VLESS+TLS, а не Reality</h4>
+<p>| Протокол | Статус | Причина |</p>
+<p>|----------|--------|---------|</p>
+<p>| <strong>VLESS+TLS</strong> | ✅ Основной | Reality handshake нестабилен в lx 1.14; чистый VLESS+TLS с Let's Encrypt надёжнее. Flow=vision блокируется ТСПУ — убран. |</p>
+<p>| <strong>Hysteria2</strong> | ⚠️ Резерв | Работает по UDP/QUIC. Мобильные операторы РФ режут UDP → <code>context deadline exceeded</code>. urltest автоматически выбирает VLESS. |</p>
+<p>| <strong>WireGuard/WARP</strong> | 📋 План | Конфиг готов, не интегрирован в Android. |</p>
+<p>| <strong>AmneziaWG</strong> | 📋 План | lx-форк поддерживает, требует сборки с <code>with_awg</code>. |</p>
+<h4>urltest — автоматический выбор</h4>
+<pre><code>urltest[auto]:
+  ├─ vless     → available: 165ms ✓ ВЫБРАН
+  └─ hysteria2 → unavailable: context deadline exceeded (UDP режется)</code></pre>
+<p>Каждые 30 секунд sing-box тестирует оба outbound через <code>https://www.gstatic.com/generate_204</code>. Выбирает самый быстрый (с допуском 50ms).</p>
+<hr>
+<h3>6. Логирование — как логи доходят до UI</h3>
+<pre><code>sing-box ядро (Go)
+    │
+    ▼ CommandServer (UNIX domain socket внутри процесса)
+    │
+    ▼ CommandClient(CommandLog)
+    │
+    ▼ writeLogs(LogIterator) → LogEntry.getMessage()
+    │
+    ▼ SnowdenVpnService.sendLog()
+    │
+    ├─→ Log.i(&quot;SnowdenVpn&quot;, msg)          → logcat
+    ├─→ File(filesDir, &quot;vpn.log&quot;)          → файл
+    └─→ MethodChannel(&#x27;snowden.system/vpn&#x27;).invokeMethod(&quot;onLog&quot;, msg)
+                │
+                ▼
+        Flutter: setState(() =&gt; _logs.add(line))
+                │
+                ▼
+        Панель логов в UI (с кнопкой копирования)</code></pre>
+<p><strong>Почему через binaryMessenger (static):</strong> VpnService и MainActivity — разные компоненты с разными lifecycle. Service не может держать ссылку на MethodChannel из Activity (Activity может быть уничтожена, а Service работать). Поэтому <code>binaryMessenger</code> хранится статически в <code>MainActivity.Companion</code>.</p>
+<hr>
+<h3>7. Жизненный цикл VPN</h3>
+<pre><code>[Пользователь нажимает ПОДКЛЮЧИТЬ]
+    │
+    ▼
+Flutter → MethodChannel &#x27;startVpn&#x27; → MainActivity
+    │
+    ▼
+VpnService.prepare(this) → системный диалог &quot;Разрешить VPN?&quot;
+    │
+    ├─ Отказ → ничего не происходит
+    │
+    ▼ Разрешение получено
+startForegroundService(SnowdenVpnService, ACTION_START, config)
+    │
+    ▼
+SnowdenVpnService.onStartCommand:
+    ├─ createNotificationChannel + startForeground (обязательно для Android 8+)
+    ├─ Libbox.setup(setFixAndroidStack=true)
+    ├─ detectDefaultInterface() → &quot;rmnet_data2&quot;
+    ├─ CommandServer(handler, platform).start()
+    ├─ CommandClient(CommandLog).connect() → поток логов
+    └─ Thread { startOrReloadService(config, override) }
+         │
+         ▼ sing-box ядро стартует
+         │
+         ├─ PlatformInterface.startDefaultInterfaceMonitor(listener)
+         │   └─ registerInterfaceListener → updateDefaultInterface(&quot;rmnet_data2&quot;)
+         │
+         ├─ PlatformInterface.getInterfaces()
+         │   └─ [wlan2, rmnet_data1, rmnet_data2] (с IPv4/prefix)
+         │
+         ├─ PlatformInterface.openTun(options)
+         │   ├─ VpnService.Builder()
+         │   ├─ addAddress(&quot;172.19.0.1&quot;, 30)
+         │   ├─ addRoute(&quot;0.0.0.0&quot;, 0)       ← весь трафик
+         │   ├─ addDnsServer(&quot;8.8.8.8&quot;, &quot;1.1.1.1&quot;)
+         │   ├─ addDisallowedApplication(own app)  ← анти-петля
+         │   ├─ establish() → ParcelFileDescriptor
+         │   └─ return fd → sing-box начинает читать TUN
+         │
+         ├─ [Трафик приложения попадает в TUN]
+         │
+         ├─ sing-box создаёт outbound-сокет к VPS (89.125.1.217:443)
+         │   └─ PlatformInterface.autoDetectInterfaceControl(fd)
+         │       └─ service.protect(fd)      ← сокет не уйдёт в TUN
+         │
+         └─ [Данные текут: приложение ↔ TUN ↔ sing-box ↔ VLESS ↔ VPS ↔ интернет]</code></pre>
+<hr>
+<h3>8. Известные ограничения и будущие доработки</h3>
+<p>| Компонент | Статус | Что нужно |</p>
+<p>|-----------|--------|-----------|</p>
+<p>| <strong>Hysteria2 по мобильной сети</strong> | ❌ UDP режется | Настроить UDP-порт на VPS через другой диапазон; или использовать только Wi-Fi. |</p>
+<p>| <strong>Адаптивный движок (Circuit Breaker)</strong> | 📋 План | Перенести с ПК (Go) → Kotlin. Автопереключение серверов при сбое. |</p>
+<p>| <strong>Error Classifier</strong> | 📋 План | Парсинг логов sing-box на Android для классификации ошибок. |</p>
+<p>| <strong>Telegram-бот мониторинг</strong> | 📋 План | Отчёты каждые 15 мин (как на ПК). |</p>
+<p>| <strong>Cloudflare Worker</strong> | 📋 План | Динамические конфиги, edge health-check. |</p>
+<p>| <strong>IPv6</strong> | ❌ Отключён | <code>strategy: "ipv4_only"</code>. Некоторые операторы дают IPv6 — можно включить. |</p>
+<p>| <strong>Per-app VPN</strong> | 📋 Возможность | VpnService.Builder поддерживает <code>addAllowedApplication</code> — можно пускать через VPN только выбранные приложения. |</p>
+<hr>
+<h3>9. Сборка из исходников</h3>
+<h4>Требования</h4>
+<ul>
+<li>Flutter SDK</li>
+<li>JDK 17 (Eclipse Adoptium)</li>
+<li>Android SDK (minSdk 23, targetSdk 34)</li>
+<li>libbox.aar (sing-box-lx 1.14.0-lx.3, arm64-v8a) в `android/app/libs/`</li>
+</ul>
+<h4>Команды</h4>
+<pre><code># Сборка release APK
+flutter build apk --release
+
+# Результат
+build/app/outputs/flutter-apk/app-release.apk</code></pre>
+<h4>Установка на устройство</h4>
+<pre><code>adb install -r app-release.apk</code></pre>
+<hr>
+<h3>10. Дебаг</h3>
+<h4>Чтение логов</h4>
+<pre><code># Логи SnowdenVpn (наши)
+adb logcat -s SnowdenVpn:V
+
+# Логи по PID процесса
+adb logcat --pid=$(adb shell pidof com.snowden.system.snowden_android)
+
+# Native краши (tombstone)
+adb logcat -b crash
+
+# Трафик TUN
+adb shell cat /proc/net/dev | grep tun0</code></pre>
+<h4>Типичные проблемы</h4>
+<p>| Симптом | Причина | Решение |</p>
+<p>|---------|---------|---------|</p>
+<p>| <code>no available network interface</code> | <code>getInterfaces()</code> выбрасывает исключение | Реализовать перечисление через <code>java.net.NetworkInterface</code> |</p>
+<p>| SIGABRT в libbox.so | Адреса без prefix length (<code>10.0.0.1</code> вместо <code>10.0.0.1/24</code>) | Использовать <code>InterfaceAddress.getNetworkPrefixLength()</code> |</p>
+<p>| <code>protected fd=</code> не появляется | <code>startDefaultInterfaceMonitor</code> пустой | Реализовать + вызвать <code>updateDefaultInterface</code> |</p>
+<p>| Трафик петлит в TUN | <code>protect()</code> не вызывается | Проверить <code>usePlatformAutoDetectInterfaceControl() == true</code> |</p>
+<p>| Банки не работают | Весь трафик через VPN | Добавить split-tunneling (.ru → direct) |</p>
+<p>| Telegram не работает | <code>hijack-dns</code> без матчера перехватывает всё | <code>{"protocol": "dns", "action": "hijack-dns"}</code> |</p>
+<p>| gVisor SIGSEGV | Несовместимость с MTE на новых ARM64 | <code>stack: "system"</code> + <code>setFixAndroidStack(true)</code> |</p>
+<hr>
+<h3>11. Структура проекта</h3>
+<pre><code>snowden_android_short/
+├── lib/
+│   └── main.dart                    # Flutter UI + генерация конфига sing-box
+├── android/app/src/main/kotlin/com/snowden/system/snowden_android/
+│   ├── MainActivity.kt              # MethodChannel bridge, VPN permission, restart-before-start
+│   ├── SnowdenVpnService.kt         # VpnService + libbox + Telegram reporting
+│   ├── SnowdenTileService.kt        # Quick Settings Tile (кнопка в шторке)
+│   └── TelegramReporter.kt          # Отправка статуса VPN в Telegram
+├── android/app/libs/
+│   └── libbox.aar                   # sing-box-lx 1.14.0-lx.3 (98MB, arm64-v8a)
+└── android/app/src/main/
+    └── AndroidManifest.xml          # VpnService + foreground service + Tile declaration</code></pre>
+<hr>
+<h3>12. Исключение банков и ВК (Anti-Detection)</h3>
+<h4>Проблема</h4>
+<p>Российские банки и Госуслуги определяют, что включён VPN, и блокируют вход</p>
+<p>(антифрод: "вход из-за границы" / "обнаружен прокси"). Это происходит потому,</p>
+<p>что трафик попадает в TUN → приложение видит <code>tun0</code> интерфейс + чужой IP.</p>
+<h4>Решение: `addDisallowedApplication`</h4>
+<p>В <code>openTun()</code> вызываем <code>builder.addDisallowedApplication(pkg)</code> для каждого банка.</p>
+<p>Это исключает пакет <strong>полностью</strong> из VPN — его сокеты идут через физический</p>
+<p>интерфейс напрямую, TUN их не видит.</p>
+<pre><code>val bankPackages = listOf(
+    &quot;ru.sberbankmobile&quot;,      // СберБанк
+    &quot;com.idamob.tinkoff.android&quot;,  // Т-Банк
+    &quot;ru.vtb24.mobilebanking.android&quot;,  // ВТБ
+    // ... 28 пакетов
+)
+for (pkg in bankPackages) {
+    builder.addDisallowedApplication(pkg)
+}</code></pre>
+<h4>Почему это работает</h4>
+<p><code>addDisallowedApplication</code> — это уровень Android VpnService API. Система просто</p>
+<p>не маршрутизирует сокеты этого UID через TUN. Приложение:</p>
+<ul>
+<li>Не видит `tun0` интерфейс</li>
+<li>Не имеет VPN network capability</li>
+<li>Видит обычный IP оператора</li>
+</ul>
+<p>Это <strong>надёжнее</strong> чем доменные правила в sing-box, т.к. работает даже если банк</p>
+<p>использует IP-адреса напрямую (без DNS).</p>
+<h4>Список исключённых приложений (28 пакетов)</h4>
+<ul>
+<li>**Банки**: Сбер, Т-Банк, ВТБ, Альфа, РСХБ, Газпромбанк, МКБ, ПСБ, Открытие,</li>
+</ul>
+<p>  Хоум Кредит, Россельхозбанк, ОТП, Райффайзен</p>
+<ul>
+<li>**Госуслуги**: Госуслуги, Налоговая</li>
+<li>**Соцсети/Маркетплейсы**: ВКонтакте, Одноклассники, ВК Мессенджер, Mail.ru,</li>
+</ul>
+<p>  Авито, Озон, Wildberries, Яндекс</p>
+<hr>
+<h3>13. Quick Settings Tile (кнопка в шторке)</h3>
+<h4>Архитектура</h4>
+<p><code>SnowdenTileService</code> наследует <code>TileService</code> — стандартный Android API для</p>
+<p>добавления кастомных плиток в шторку быстрых настроек.</p>
+<h4>Поведение</h4>
+<p>| Состояние | Действие при тапе |</p>
+<p>|-----------|-------------------|</p>
+<p>| VPN выключен | Запускает VPN (из сохранённого конфига) |</p>
+<p>| VPN включён | Останавливает VPN |</p>
+<p>| Нет конфига | Открывает приложение для первичной настройки |</p>
+<h4>Хранение конфига</h4>
+<p><code>SnowdenTileConfig</code> сохраняет последний конфиг в SharedPreferences при каждом</p>
+<p>запуске из приложения. Tile читает его и запускает VPN без UI.</p>
+<h4>Как добавить плитку</h4>
+<p>Tile не появляется автоматически — Android требует ручного добавления:</p>
+<ol>
+<li>Открыть шторку (смахнуть вниз дважды)</li>
+<li>Нажать ✏️ (карандаш / «Изменить»)</li>
+<li>Найти «snowden.system» в доступных плитках</li>
+<li>Перетащить в активную зону</li>
+</ol>
+<hr>
+<h3>14. Telegram Reporter (Android → Telegram)</h3>
+<h4>Зачем</h4>
+<p>Android-устройство должно сообщать свой статус в тот же Telegram-чат, что и ПК.</p>
+<p>Это позволяет удалённо знать: включён ли VPN на телефоне, работает ли он.</p>
+<h4>Архитектура</h4>
+<p><code>TelegramReporter</code> — singleton-объект (Kotlin <code>object</code>), который отправляет</p>
+<p>HTTPS POST на <code>api.telegram.org</code> при событиях VPN.</p>
+<p>| Событие | Сообщение |</p>
+<p>|---------|-----------|</p>
+<p>| VPN подключён | 🟢 «VPN подключён» + модель телефона |</p>
+<p>| VPN отключён | 🔴 «VPN отключён» |</p>
+<p>| Ошибка запуска | ❌ «Ошибка запуска VPN» + текст ошибки |</p>
+<h4>Как это работает</h4>
+<ol>
+<li>`SnowdenVpnService.startVpn()` → успех → `TelegramReporter.report("🟢 VPN подключён")`</li>
+<li>`TelegramReporter` запускает фоновый поток</li>
+<li>HTTPS POST к `api.telegram.org/bot.../sendMessage` (через VPN-туннель,</li>
+</ol>
+<p>   т.к. Telegram API заблокирован в РФ)</p>
+<ol>
+<li>Сообщение появляется в чате</li>
+</ol>
+<h4>Почему через VPN-туннель</h4>
+<p><code>api.telegram.org</code> заблокирован в России. Прямой запрос из Android упадёт с</p>
+<p>timeout. Но к моменту вызова <code>TelegramReporter.report()</code> VPN уже поднят, и</p>
+<p>трафик Android-приложения идёт через TUN → VPS → Telegram API. Поэтому запрос</p>
+<p>проходит. При <code>stopVpn</code> сообщение об отключении может не дойти (VPN уже закрыт).</p>
+<h4>Throttling</h4>
+<p><code>reportOkIfDue()</code> — не чаще раза в 30 минут, чтобы не спамить.</p>
+<hr>
+<h3>15. Restart-before-start фикс</h3>
+<h4>Проблема</h4>
+<p>Если VPN запущен из Tile (шторки), а потом пользователь нажимает кнопку в</p>
+<p>приложении — sing-box падает с <code>engine: already running</code>.</p>
+<h4>Решение</h4>
+<p>В <code>MainActivity.startVpn</code> перед запуском проверяем <code>SnowdenVpnService.isRunning</code>.</p>
+<p>Если True — сначала отправляем <code>ACTION_STOP</code>, ждём 800мс, потом запускаем заново:</p>
+<pre><code>if (SnowdenVpnService.isRunning) {
+    val stopIntent = Intent(this, SnowdenVpnService::class.java)
+    stopIntent.action = ACTION_STOP
+    startService(stopIntent)
+    Thread.sleep(800)
+}</code></pre>
+<hr>
+<h3>16. Теория: как работает обход блокировок</h3>
+<h4>ТСПУ (Технические средства противодействия угрозам)</h4>
+<p>Роскомнадзор устанавливает ТСПУ у провайдеров — это DPI (Deep Packet Inspection),</p>
+<p>который анализирует трафик и блокирует по сигнатурам.</p>
+<h4>Что блокирует ТСПУ</h4>
+<p>| Протокол | Метод блокировки |</p>
+<p>|----------|-----------------|</p>
+<p>| OpenVPN | Сигнатура TLS handshake |</p>
+<p>| WireGuard | UDP-фингерпринт |</p>
+<p>| Shadowsocks | Энтропийный анализ |</p>
+<p>| Tor | Список relay-узлов |</p>
+<p>| Telegram (MTProto) | SNI + IP-блокировка |</p>
+<h4>Почему VLESS+TLS работает</h4>
+<p>VLESS оборачивает трафик в стандартный TLS handshake с настоящим сертификатом</p>
+<p>(Let's Encrypt). Для ТСПУ это выглядит как обычный HTTPS к сайту:</p>
+<pre><code>[Телефон] → TLS(ClientHello, SNI=snowden-system.nip.io) → [ТСПУ] → [VPS]
+                            ↑
+                   ТСПУ видит обычный HTTPS.
+                   Не может отличить от легитимного трафика.</code></pre>
+<h4>Почему НЕ Reality</h4>
+<p>Reality — это продвинутый TLS-маскировка (подмена сертификата реального сайта).</p>
+<p>Но в sing-box-lx 1.14 Reality handshake нестабилен, а чистый VLESS+TLS с</p>
+<p>настоящим Let's Encrypt сертификатом надёжнее и проще.</p>
+<h4>Почему НЕ flow=vision</h4>
+<p><code>xtls-rprx-vision</code> — ускорение VLESS через direct-path (без расшифровки</p>
+<p>payload). Но ТСПУ научился детектить vision-трафик по паттернам. Чистый VLESS</p>
+<p>без flow проходит как обычный TLS.</p>
+<h4>BBR Congestion Control</h4>
+<p>На VPS включён BBR вместо стандартного cubic. BBR лучше для дальних линков</p>
+<p>(Россия → Нидерланды, ~76ms):</p>
+<ul>
+<li>Не реагирует на случайные потери пакетов (cubic воспринимает как перегрузку)</li>
+<li>Агрессивнее захватывает полосу</li>
+<li>Стабилизирует latency (было 0.4-2.8с → стало 0.3-0.5с)</li>
+</ul>
+<h4>Split-tunneling (раздельное туннелирование)</h4>
+<p>Российские сайты идут напрямую (мимо VPN), заблокированные — через VPN.</p>
+<p>Это нужно потому что:</p>
+<ul>
+<li>Банки блокируют зарубежные IP (антифрод)</li>
+<li>Госуслуги не пускают с иностранных IP</li>
+<li>Российские сайты доступны напрямую (нет смысла тратить VPN-трафик)</li>
+</ul>
+<h4>urltest (автоматический выбор протокола)</h4>
+<p>sing-box каждые 30 секунд тестирует оба outbound (VLESS + Hysteria2) через</p>
+<p>HTTP-запрос к <code>gstatic.com/generate_204</code>. Выбирает самый быстрый.</p>
+<p>На мобильной сети Hysteria2 (UDP) обычно недоступен — операторы режут QUIC.</p>
+<p>urltest автоматически выбирает VLESS (TCP).</p>
+<hr>
+<h3>17. Учётные данные сервера</h3>
+<pre><code>VPS: 89.125.1.217 (Нидерланды)
+VLESS:    порт 443/TCP,  TLS (Let&#x27;s Encrypt), BBR
+Hysteria2: порт 8443/UDP, TLS (режется мобильными операторами)
+Домен:    snowden-system.192-109-206-234.nip.io (wildcard DNS nip.io)
+CPU:      1 ядро Xeon Skylake, 2GB RAM
+Скорость: ~600 Мбит/с (VPS→Cloudflare), ~40 Мбит/с (через туннель)</code></pre>
+<hr>
+<p>*Документация обновлена 2026-07-15. Версия: 1.1.0.*</p>
+<p>*Включает: Tile, Telegram Reporter, банковские исключения, теория обхода.*</p>
+<p>*Тестирование: Honor PTP-N49, HarmonyOS 6, через LTE (МегаФон) + Wi-Fi.*</p>

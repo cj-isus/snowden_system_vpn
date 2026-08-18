@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>snowden.system — privacy is a human right</title>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        :root {
+            --bg:#080808; --bg-card:#101010; --bg-hover:#151515;
+            --green:#3CFF5A; --green-dim:#28D850; --glow:rgba(60,255,90,0.08);
+            --border:rgba(60,255,90,0.08); --border-h:rgba(60,255,90,0.2);
+            --text:#EAEAEA; --dim:#9A9A9A; --muted:#555;
+        }
+        body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif; background:var(--bg); color:var(--text); line-height:1.6; overflow-x:hidden; }
+        a { color:var(--green); text-decoration:none; }
+        code { background:#1a1a1a; padding:2px 6px; border-radius:4px; font-family:'Courier New',monospace; font-size:13px; color:var(--green); }
+        pre { background:#0d0d0d; border:1px solid var(--border); border-radius:10px; padding:14px; overflow-x:auto; margin:12px 0; }
+        pre code { background:none; padding:0; color:var(--text); }
+
+        .hero { min-height:70vh; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:40px 20px; position:relative; }
+        .hero::before { content:''; position:absolute; top:0;left:0;right:0;bottom:0; background:radial-gradient(circle at 50% 30%,rgba(60,255,90,0.03) 0%,transparent 60%); pointer-events:none; }
+        .hero-logo { font-family:'Courier New',monospace; font-size:clamp(28px,5vw,48px); font-weight:700; color:var(--green); letter-spacing:-1px; margin-bottom:12px; text-shadow:0 0 30px rgba(60,255,90,0.2); }
+        .hero-tagline { font-size:clamp(14px,2vw,18px); color:var(--dim); font-family:'Courier New',monospace; margin-bottom:8px; }
+        .hero-version { display:inline-block; padding:4px 12px; border:1px solid var(--border); border-radius:20px; font-size:12px; font-family:'Courier New',monospace; color:var(--green); margin-bottom:40px; }
+        .hero-version::before { content:'● '; animation:pulse 2s ease-in-out infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+        .downloads { display:flex; flex-wrap:wrap; gap:20px; justify-content:center; max-width:1200px; margin:0 auto 60px; padding:0 20px; }
+        .card { background:var(--bg-card); border:1px solid var(--border); border-radius:18px; padding:28px; flex:1; min-width:250px; max-width:330px; transition:all 0.2s; }
+        .card:hover { border-color:var(--border-h); background:var(--bg-hover); transform:translateY(-2px); box-shadow:0 10px 40px rgba(60,255,90,0.05); }
+        .card-icon { width:48px; height:48px; display:flex; align-items:center; justify-content:center; font-size:28px; margin-bottom:16px; border-radius:12px; background:var(--glow); }
+        .card-title { font-size:18px; font-weight:700; margin-bottom:6px; }
+        .card-subtitle { font-size:13px; color:var(--dim); margin-bottom:20px; }
+        .card-meta { display:flex; gap:12px; margin-bottom:20px; font-size:11px; font-family:'Courier New',monospace; color:var(--muted); }
+        .card-meta span { padding:2px 8px; border:1px solid var(--border); border-radius:4px; }
+        .btn { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; padding:12px; border-radius:10px; border:1px solid var(--green); background:var(--glow); color:var(--green); font-size:14px; font-weight:600; cursor:pointer; transition:all 0.2s; text-decoration:none; }
+        .btn:hover { background:var(--green); color:var(--bg); box-shadow:0 0 20px rgba(60,255,90,0.2); }
+
+        .features { max-width:1000px; margin:0 auto 60px; padding:0 20px; }
+        .section-title { text-align:center; font-size:14px; font-weight:700; color:var(--muted); letter-spacing:2px; margin-bottom:24px; }
+        .features-grid { display:flex; flex-wrap:wrap; gap:12px; justify-content:center; }
+        .feature { padding:8px 16px; border:1px solid var(--border); border-radius:8px; font-size:13px; color:var(--dim); background:var(--bg-card); }
+        .feature::before { content:'✓ '; color:var(--green); font-weight:700; }
+
+        .docs { max-width:900px; margin:0 auto 60px; padding:0 20px; }
+        .doc-section { background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:28px; margin-bottom:24px; }
+        .doc-section h2 { font-size:20px; font-weight:700; color:var(--green); margin-bottom:16px; display:flex; align-items:center; gap:8px; cursor:pointer; }
+        .doc-section h2::after { content:'▼'; font-size:12px; color:var(--muted); margin-left:auto; transition:transform 0.2s; }
+        .doc-section.collapsed h2::after { transform:rotate(-90deg); }
+        .doc-section.collapsed .doc-content { display:none; }
+        .doc-content { animation:fadeIn 0.3s ease; }
+        @keyframes fadeIn { from{opacity:0} to{opacity:1} }
+        .doc-content h3 { font-size:15px; font-weight:600; color:var(--text); margin:16px 0 8px; }
+        .doc-content p { font-size:14px; color:var(--dim); margin-bottom:8px; }
+        .doc-content ul, .doc-content ol { padding-left:20px; margin:8px 0; }
+        .doc-content li { font-size:14px; color:var(--dim); margin-bottom:4px; }
+        .doc-content .note { padding:12px; border:1px solid var(--border); border-radius:8px; background:#0d0d0d; font-size:13px; color:#FFC533; margin:12px 0; }
+        .doc-content table { width:100%; border-collapse:collapse; margin:12px 0; }
+        .doc-content th, .doc-content td { border:1px solid var(--border); padding:8px 12px; text-align:left; font-size:13px; color:var(--dim); }
+        .doc-content th { color:var(--green); }
+
+        .footer { text-align:center; padding:40px 20px; border-top:1px solid var(--border); }
+        .footer-text { font-size:12px; color:var(--muted); margin-bottom:8px; }
+        .footer-quote { font-family:'Courier New',monospace; font-size:14px; color:var(--green); opacity:0.7; }
+    </style>
+</head>
+<body>
+
+    <section class="hero">
+        <div class="hero-logo">snowden.system</div>
+        <div class="hero-tagline">&gt; privacy is a human right</div>
+        <div class="hero-version">v1.3.5</div>
+    </section>
+
+    <div class="downloads">
+        <div class="card">
+            <div class="card-icon">💻</div>
+            <div class="card-title">Windows ПК</div>
+            <div class="card-subtitle">Дашборд, Circuit Breaker, Telegram-бот</div>
+            <div class="card-meta"><span>15 MB</span><span>ZIP</span></div>
+            <a class="btn" href="http://89.125.1.217:8090/snowden-portable.zip" download>⬇ Скачать</a>
+        </div>
+        <div class="card">
+            <div class="card-icon">📱</div>
+            <div class="card-title">Android</div>
+            <div class="card-subtitle">Одна кнопка, Tile в шторке, банки без VPN</div>
+            <div class="card-meta"><span>110 MB</span><span>APK</span></div>
+            <a class="btn" href="http://89.125.1.217:8090/snowden-android.apk" download>⬇ Скачать APK</a>
+        </div>
+        <div class="card">
+            <div class="card-icon">🍎</div>
+            <div class="card-title">iOS</div>
+            <div class="card-subtitle">Конфиг для sing-box или Karing (App Store)</div>
+            <div class="card-meta"><span>4 KB</span><span>JSON</span></div>
+            <a class="btn" href="http://89.125.1.217:8090/snowden-ios-config.json" download>⬇ Скачать конфиг</a>
+        </div>
+        <div class="card">
+            <div class="card-icon">📦</div>
+            <div class="card-title">sing-box Android</div>
+            <div class="card-subtitle">Конфиг для sing-box из Play Store</div>
+            <div class="card-meta"><span>4 KB</span><span>JSON</span></div>
+            <a class="btn" href="http://89.125.1.217:8090/snowden-android-singbox.json" download>⬇ Скачать конфиг</a>
+        </div>
+        <div class="card">
+            <div class="card-icon">🛡</div>
+            <div class="card-title">Amnezia VPN</div>
+            <div class="card-subtitle">WARP (AmneziaWG) — Cloudflare обход</div>
+            <div class="card-meta"><span>3 KB</span><span>CONF</span></div>
+            <a class="btn" href="http://89.125.1.217:8090/snowden-amnezia.conf" download>⬇ Скачать конфиг</a>
+        </div>
+    </div>
+
+    <div class="features">
+        <div class="section-title">// ВОЗМОЖНОСТИ</div>
+        <div class="features-grid">
+            <div class="feature">2 сервера: Нидерланды + Франция</div>
+            <div class="feature">gRPC (50+ Мбит/с)</div>
+            <div class="feature">HTTPUpgrade (анти-ТСПУ)</div>
+            <div class="feature">Firefox uTLS fingerprint</div>
+            <div class="feature">Split-tunneling (.ru → напрямую)</div>
+            <div class="feature">Банки без VPN (90+ приложений)</div>
+            <div class="feature">Circuit Breaker (авто-восстановление)</div>
+            <div class="feature">Telegram-бот админ-панель</div>
+            <div class="feature">urltest авто-переключение</div>
+            <div class="feature">BBR на обоих серверах</div>
+            <div class="feature">Crash handler + авто-очистка прокси</div>
+        </div>
+    </div>
+
+    <div class="docs">
+        <div class="section-title">// ДОКУМЕНТАЦИЯ</div>
+
+        <!-- PC -->
+        <div class="doc-section">
+            <h2>💻 ПК (Windows) — полная инструкция</h2>
+            <div class="doc-content">
+                <h3>Установка</h3>
+                <ol>
+                    <li>Скачать ZIP (15 МБ) с этой страницы</li>
+                    <li>Распаковать в любую папку</li>
+                    <li>Запустить <code>snowden-system.exe</code></li>
+                    <li>Нажать кнопку ВКЛ (большая зелёная кнопка)</li>
+                    <li>Дождаться статуса «ЗАЩИЩЁН»</li>
+                </ol>
+                <div class="note">Не требует прав администратора. Работает из любой папки.</div>
+
+                <h3>Интерфейс</h3>
+                <table>
+                    <tr><th>Карточка</th><th>Что показывает</th></tr>
+                    <tr><td>Status</td><td>Состояние VPN + сервер + пинг. Кнопка ВКЛ/ВЫКЛ</td></tr>
+                    <tr><td>Servers</td><td>Список серверов с живым TCP-пингом (обновление 10 сек)</td></tr>
+                    <tr><td>Routing</td><td>Правила маршрутизации. Тогглы применяются мгновенно (hot-reload)</td></tr>
+                    <tr><td>Traffic</td><td>Скорость + график + total за сессию + uptime</td></tr>
+                    <tr><td>Diagnostics</td><td>Health-check: интернет, сервер, туннель, DNS, TLS</td></tr>
+                    <tr><td>Events</td><td>Лента событий адаптивного движка</td></tr>
+                    <tr><td>Logs</td><td>Реальные логи sing-box внизу экрана. Выделить мышью → Ctrl+C</td></tr>
+                    <tr><td>Settings</td><td>Автозапуск, импорт/экспорт конфига</td></tr>
+                    <tr><td>Domain Stats</td><td>Per-domain статистика (какой outbound, latency)</td></tr>
+                </table>
+
+                <h3>Раздельное туннелирование</h3>
+                <p>Российские сайты (.ru, .su, .рф + 245 доменов) идут напрямую — без VPN. Банки, Госуслуги, ВКонтакте, Яндекс, Авито, Ozon.</p>
+                <p>Заблокированные (YouTube, Telegram, Discord, ChatGPT) — через VPN.</p>
+
+                <h3>Circuit Breaker</h3>
+                <p>Health-check каждые 30 сек. Если туннель падает — автоматическое переподключение. 3 состояния: HEALTHY → FAILED → RECOVERING.</p>
+
+                <h3>Telegram-бот</h3>
+                <p>Приложение отправляет отчёты в Telegram при ошибках (не чаще раза в час). Админ-панель с inline-кнопками:</p>
+                <ul>
+                    <li><code>/status</code> — состояние VPN</li>
+                    <li><code>/servers</code> — список серверов с пингом</li>
+                    <li><code>/traffic</code> — трафик сессии</li>
+                    <li><code>/reconnect</code> — переподключить</li>
+                    <li><code>/logs</code> — последние логи</li>
+                    <li><code>/devices</code> — список устройств</li>
+                    <li><code>/pc</code> <code>/apk</code> <code>/ios</code> — скачать файлы</li>
+                </ul>
+
+                <h3>Обновление</h3>
+                <p>Settings → «Проверить обновления». Если есть новая версия — откроется эта страница.</p>
+
+                <h3>Решение проблем</h3>
+                <ul>
+                    <li><strong>VPN не подключается</strong> — закройте и откройте приложение. Cache.db очищается автоматически.</li>
+                    <li><strong>Нет интернета после выключения VPN</strong> — прокси очищается автоматически (crash handler). При перезапуске — stale proxy cleanup.</li>
+                    <li><strong>Медленно</strong> — проверьте ServersCard. urltest выбирает лучший сервер автоматически.</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Android -->
+        <div class="doc-section collapsed">
+            <h2>📱 Android — полная инструкция</h2>
+            <div class="doc-content">
+                <h3>Установка</h3>
+                <ol>
+                    <li>Скачать APK (110 МБ)</li>
+                    <li>Открыть APK → разрешить установку из этого источника</li>
+                    <li>Открыть snowden.system → нажать ПОДКЛЮЧИТЬ</li>
+                    <li>Разрешить VPN (системный диалог) — готово</li>
+                </ol>
+                <div class="note">⚠️ Если APK не ставится: Настройки → Спецдоступ → Установка из неизвестных источников → разрешить браузер.</div>
+
+                <h3>Важно: другие VPN</h3>
+                <p>Android разрешает только один VPN одновременно. Перед подключением snowden.system отключите Amnezia VPN, WireGuard,或其他 VPN-приложения. Если Amnezia работает в фоне — остановите её: Настройки → Приложения → Amnezia → Остановить.</p>
+
+                <h3>Кнопка в шторке (Quick Settings Tile)</h3>
+                <ol>
+                    <li>Шторка вниз дважды</li>
+                    <li>✏️ карандаш / «Изменить»</li>
+                    <li>Найти плитку «snowden.system»</li>
+                    <li>Перетащить в активную зону</li>
+                </ol>
+
+                <h3>Банки не видят VPN</h3>
+                <p>90+ российских приложений полностью исключены из VPN (addDisallowedApplication). Их трафик идёт напрямую через физический интерфейс — банк видит обычный российский IP, а не VPN.</p>
+                <p>Исключены: Сбер, Т-Банк, ВТБ, Альфа, РСХБ, Газпромбанк, МКБ, ПСБ, Открытие, Хоум Кредит, ОТП, Райффайзен, Росбанк, Совкомбанк, Ак Барс, ВкусВилл, Ozon, Wildberries, Авито, ВКонтакте, Mail.ru, Яндекс (12 сервисов), Госуслуги, МТС, Билайн, Мегафон, Tele2, Кинопоиск, 2ГИС и др.</p>
+
+                <h3>Настройки (⚙️ в шапке)</h3>
+                <ul>
+                    <li><strong>Раздельное туннелирование</strong> — вкл/выкл (.ru напрямую)</li>
+                    <li><strong>Hysteria2</strong> — вкл/выкл UDP протокол</li>
+                    <li><strong>Telegram-отчёты</strong> — статус VPN в Telegram-бот</li>
+                    <li><strong>Отправить логи</strong> — кнопка ✈️ в панели логов, отправляет логи в Telegram</li>
+                </ul>
+
+                <h3>Выбор сервера</h3>
+                <p>В Настройках можно выбрать сервер вручную: Авто / Нидерланды / Франция. По умолчанию — Авто (urltest выбирает лучший).</p>
+
+                <h3>Обновление</h3>
+                <p>Иконка 🔔 в шапке если есть обновление. Или скачайте свежий APK.</p>
+
+                <h3>Альтернативный способ: sing-box из Play Store</h3>
+                <p>Скачайте конфиг «sing-box Android» выше. Установите sing-box из Play Store. Откройте файл конфига через sing-box → Connect.</p>
+            </div>
+        </div>
+
+        <!-- iOS -->
+        <div class="doc-section collapsed">
+            <h2>🍎 iOS (iPhone) — инструкция</h2>
+            <div class="doc-content">
+                <h3>Способ 1: sing-box (App Store, бесплатно)</h3>
+                <ol>
+                    <li>App Store → найти и установить <strong>sing-box</strong> (бесплатно)</li>
+                    <li>Скачать конфиг «iOS» вверху страницы</li>
+                    <li>Открыть файл <code>snowden-ios-config.json</code> через sing-box</li>
+                    <li>Разрешить VPN (системный диалог)</li>
+                    <li>Нажать <strong>Connect</strong></li>
+                </ol>
+
+                <h3>Способ 2: Karing (App Store, бесплатно)</h3>
+                <ol>
+                    <li>App Store → найти и установить <strong>Karing</strong> (бесплатно)</li>
+                    <li>Скачать конфиг «sing-box Android» вверху страницы (тот же формат)</li>
+                    <li>Открыть файл <code>snowden-android-singbox.json</code> через Karing</li>
+                    <li>Разрешить VPN → нажать <strong>Start</strong></li>
+                </ol>
+                <div class="note">ℹ️ Собственное iOS-приложение требует Mac + Apple Developer ($99/год). Бесплатная альтернатива — sing-box или Karing с нашим конфигом.</div>
+
+                <h3>Что работает через VPN</h3>
+                <p>Telegram, YouTube, Discord, ChatGPT, Instagram, Netflix — всё заблокированное.</p>
+
+                <h3>Что идёт напрямую</h3>
+                <p>Российские сайты (.ru, банки, Госуслуги) — через split-tunneling в конфиге. Банковские приложения работают без детекции VPN.</p>
+
+                <h3>Отличия от Android-версии</h3>
+                <ul>
+                    <li>Нет банковских исключений по пакетам (iOS не поддерживает) — только по доменам</li>
+                    <li>Нет кнопки в шторке (iOS не поддерживает)</li>
+                    <li>Нет Telegram-репортера</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Amnezia -->
+        <div class="doc-section collapsed">
+            <h2>🛡 Amnezia VPN — альтернативный способ</h2>
+            <div class="doc-content">
+                <h3>Установка</h3>
+                <ol>
+                    <li>Скачать Amnezia VPN с <code>amnezia.org</code> (Windows, Android, iOS)</li>
+                    <li>Скачать конфиг «Amnezia VPN» вверху страницы (<code>snowden-amnezia.conf</code>)</li>
+                    <li>Открыть Amnezia VPN → <strong>Настройки</strong> → <strong>Импорт</strong> → выбрать скачанный файл</li>
+                    <li>Нажать <strong>Подключить</strong></li>
+                </ol>
+                <div class="note">⚠️ Amnezia и snowden.system не могут работать одновременно — Android/iOS разрешают только один активный VPN. Выключите одно перед включением другого.</div>
+
+                <h3>Что это даёт</h3>
+                <p><strong>WARP (Cloudflare AmneziaWG)</strong> — бесплатный VPN с обфускацией трафика. Обходит блокировки РКН через протокол WireGuard с дополнительными параметрами (jc, jmin, jmax, h1-h4), которые маскируют пакеты.</p>
+
+                <h3>Что работает</h3>
+                <ul>
+                    <li>Telegram, YouTube, Discord — через Cloudflare WARP</li>
+                    <li>Российские сайты — напрямую (если настроить маршрутизацию в Amnezia)</li>
+                </ul>
+
+                <h3>Отличия от snowden.system</h3>
+                <table>
+                    <tr><th>Параметр</th><th>snowden.system</th><th>Amnezia + WARP</th></tr>
+                    <tr><td>Протокол</td><td>VLESS+TLS (gRPC/HTTPUpgrade)</td><td>AmneziaWG (WireGuard)</td></tr>
+                    <tr><td>Сервер</td><td>Свой VPS (NL+FR)</td><td>Cloudflare (бесплатно)</td></tr>
+                    <tr><td>IP</td><td>Нидерланды / Франция</td><td>Cloudflare (часто RU)</td></tr>
+                    <tr><td>Анти-ТСПУ</td><td>Firefox uTLS + gRPC</td><td>AmneziaWG обфускация</td></tr>
+                    <tr><td>Split-tunnel</td><td>245+ доменов, 90+ приложений</td><td>Только по доменам (вручную)</td></tr>
+                    <tr><td>Банки</td><td>Не видят VPN</td><td>Могут детектить</td></tr>
+                </table>
+                <p><strong>Рекомендация:</strong> используйте snowden.system как основной VPN. Amnezia — как резерв, если основные серверы недоступны.</p>
+            </div>
+        </div>
+
+        <!-- Architecture -->
+        <div class="doc-section collapsed">
+            <h2>🔧 Как это работает (технически)</h2>
+            <div class="doc-content">
+                <h3>Архитектура</h3>
+                <p><strong>sing-box-lx</strong> (embedded Go library) — VLESS+TLS с настоящим Let's Encrypt сертификатом. Для ТСПУ (DPI Роскомнадзора) выглядит как обычный HTTPS.</p>
+
+                <h3>2 сервера с авто-failover</h3>
+                <table>
+                    <tr><th>Сервер</th><th>IP</th><th>Локация</th><th>sing-box</th><th>BBR</th></tr>
+                    <tr><td>NL</td><td>89.125.1.217</td><td>Нидерланды</td><td>lx 1.14.0</td><td>✅</td></tr>
+                    <tr><td>FR</td><td>89.125.1.217</td><td>Франция</td><td>1.13.14</td><td>✅</td></tr>
+                </table>
+
+                <h3>7 outbound'ов в urltest</h3>
+                <p>Каждые 30 сек sing-box проверяет все 7 outbound'ов и выбирает лучший (tolerance 50ms):</p>
+                <pre><code>gRPC NL → gRPC FR → HTTPUpgrade NL → HTTPUpgrade FR → VLESS NL → VLESS FR → Hysteria2</code></pre>
+
+                <h3>Анти-ТСПУ защита</h3>
+                <ul>
+                    <li><strong>gRPC</strong> — binary framing, максимальная скорость</li>
+                    <li><strong>HTTPUpgrade</strong> — маскировка под WebSocket upgrade</li>
+                    <li><strong>Firefox uTLS</strong> — TLS fingerprint Firefox (не Go)</li>
+                    <li><strong>BBR</strong> — congestion control на серверах (стабильная latency)</li>
+                </ul>
+
+                <h3>DNS</h3>
+                <p>Split resolver: российские домены → системный DNS (быстро), VPN-домены → DoH 1.1.1.1 через туннель (защита от DPI подмены).</p>
+
+                <h3>Split-tunneling</h3>
+                <p>245+ российских доменов → direct (мимо VPN). На Android — 90+ приложений исключены через addDisallowedApplication.</p>
+
+                <h3>Circuit Breaker (ПК)</h3>
+                <p>3 состояния: HEALTHY (Closed) → FAILED (Open) → RECOVERING (HalfOpen). Health-check каждые 30 сек через deepProbe. Авто-Reload при сбое.</p>
+
+                <h3>Стабильность (ПК)</h3>
+                <ul>
+                    <li>Crash handler — SetConsoleCtrlHandler очищает прокси при Ctrl+C/Taskkill</li>
+                    <li>Stale proxy cleanup — при старте проверяет реестр на мёртвый прокси</li>
+                    <li>Cache.db auto-cleanup — удаляется перед каждым стартом sing-box</li>
+                    <li>Panic recovery — engine.Start() обёрнут в defer recover()</li>
+                </ul>
+
+                <h3>Сборка</h3>
+                <pre><code>ПК:     wails build -tags "with_awg,with_wireguard,with_utls,with_gvisor"
+Android: flutter build apk --release
+Деплой:  python deploy.py</code></pre>
+            </div>
+        </div>
+
+        <!-- Troubleshooting -->
+        <div class="doc-section collapsed">
+            <h2>🚨 Решение проблем</h2>
+            <div class="doc-content">
+                <h3>ПК: VPN не подключается</h3>
+                <ul>
+                    <li>Закройте и откройте приложение</li>
+                    <li>Удалите файл cache.db рядом с snowden-system.exe</li>
+                    <li>Проверьте что нет другого VPN запущенного</li>
+                </ul>
+
+                <h3>ПК: Нет интернета после выключения VPN</h3>
+                <p>Прокси очищается автоматически. Если не помогло — Пуск → Настройки → Сеть → Прокси → Отключить.</p>
+
+                <h3>Android: VPN не включается</h3>
+                <ul>
+                    <li>Отключите Amnezia VPN и другие VPN-приложения</li>
+                    <li>Настройки → Приложения → Amnezia → Остановить</li>
+                    <li>Перезапустите snowden.system</li>
+                </ul>
+
+                <h3>Android: Банки ругаются на VPN</h3>
+                <p>Убедитесь что в приложении включён split-tunnel (⚙️ → Раздельное туннелирование). 90+ приложений исключены автоматически.</p>
+
+                <h3>Медленная скорость</h3>
+                <p>urltest автоматически выбирает лучший сервер. Проверьте ServersCard — если все серверы с высоким пингом, возможно проблема с интернет-провайдером.</p>
+
+                <h3>Отправка логов</h3>
+                <p>Android: откройте панель логов (терминал в шапке) → нажмите ✈️ (Отправить в Telegram).</p>
+                <p>ПК: внизу окна панель логов → выделите мышью → Ctrl+C. Или Telegram-бот → <code>/logs</code>.</p>
+            </div>
+        </div>
+
+        <!-- Полная техническая документация ПК -->
+        <div class="doc-section collapsed">
+            <h2>📖 ПК — полная техническая документация</h2>
+            <div class="doc-content" id="pc-full-doc">
+                <p style="color:var(--muted);font-size:12px;">Загрузка...</p>
+            </div>
+        </div>
+
+        <!-- Полная техническая документация Android -->
+        <div class="doc-section collapsed">
+            <h2>📖 Android — полная техническая документация</h2>
+            <div class="doc-content" id="android-full-doc">
+                <p style="color:var(--muted);font-size:12px;">Загрузка...</p>
+            </div>
+        </div>
+    </div>
+
+    <footer class="footer">
+        <div class="footer-text">snowden.system v1.3.5 · sing-box-lx 1.14.0 · сделано для свободы интернета</div>
+        <div class="footer-quote">privacy is a human right</div>
+    </footer>
+
+    <script>
+        document.querySelectorAll('.doc-section h2').forEach(h2 => {
+            h2.addEventListener('click', () => {
+                h2.parentElement.classList.toggle('collapsed');
+                // Lazy-load full docs when opened
+                const content = h2.parentElement.querySelector('.doc-content');
+                if (!h2.parentElement.classList.contains('collapsed') && content && content.id === 'pc-full-doc') {
+                    fetch('docs_pc.html').then(r => r.text()).then(t => content.innerHTML = t).catch(() => content.innerHTML = '<p>Ошибка загрузки</p>');
+                }
+                if (!h2.parentElement.classList.contains('collapsed') && content && content.id === 'android-full-doc') {
+                    fetch('docs_android.html').then(r => r.text()).then(t => content.innerHTML = t).catch(() => content.innerHTML = '<p>Ошибка загрузки</p>');
+                }
+            });
+        });
+    </script>
+</body>
+</html>

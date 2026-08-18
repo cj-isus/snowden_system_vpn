@@ -1,0 +1,15 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "snowden-system",
+  "outputfilename": "snowden-system",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "goamd64": "v1",
+  "tags": "with_awg,with_wireguard,with_utls,with_gvisor",
+  "author": {
+    "name": "cj-isus",
+    "email": "ivanrrodygin@yandex.ru"
+  }
+}

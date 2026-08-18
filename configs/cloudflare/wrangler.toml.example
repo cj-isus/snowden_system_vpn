@@ -1,0 +1,21 @@
+# Cloudflare Workers config — copy to wrangler.toml and fill in YOUR namespace IDs.
+# Create the KV namespaces and D1 database with:
+#   wrangler kv namespace create SNOWDEN_CONFIG
+#   wrangler kv namespace create SNOWDEN_VERSION
+#   wrangler d1 create snowden-telemetry
+name = "snowden-system-api"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "SNOWDEN_CONFIG"
+id = "YOUR_KV_CONFIG_NAMESPACE_ID"
+
+[[kv_namespaces]]
+binding = "SNOWDEN_VERSION"
+id = "YOUR_KV_VERSION_NAMESPACE_ID"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "snowden-telemetry"
+database_id = "YOUR_D1_DATABASE_ID"

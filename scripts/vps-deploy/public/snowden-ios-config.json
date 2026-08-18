@@ -1,0 +1,298 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "https",
+        "tag": "remote",
+        "server": "1.1.1.1",
+        "detour": "auto"
+      },
+      {
+        "type": "local",
+        "tag": "local",
+        "detour": "direct"
+      }
+    ],
+    "rules": [
+      {
+        "outbound": "any",
+        "server": "local"
+      },
+      {
+        "clash_mode": "direct",
+        "server": "local"
+      }
+    ],
+    "final": "remote",
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": [
+        "172.19.0.1/30"
+      ],
+      "mtu": 1500,
+      "auto_route": true,
+      "strict_route": false,
+      "stack": "system"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": [
+        "grpc-nl",
+        "grpc-fr",
+        "httpupgrade-nl",
+        "httpupgrade-fr",
+        "vless-nl",
+        "vless-fr"
+      ],
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "30s",
+      "tolerance": 50
+    },
+    {
+      "type": "vless",
+      "tag": "grpc-nl",
+      "server": "192.109.206.234",
+      "server_port": 30843,
+      "uuid": "1e0e52d1-7935-452c-a868-80308e7ab7d2",
+      "tls": {
+        "enabled": true,
+        "server_name": "snowden-system.192-109-206-234.nip.io",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "firefox"
+        }
+      },
+      "transport": {
+        "type": "grpc",
+        "service_name": "snowden"
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "grpc-fr",
+      "server": "78.17.160.83",
+      "server_port": 30843,
+      "uuid": "87fefa00-4227-4bfc-b73a-9599e40e3e93",
+      "tls": {
+        "enabled": true,
+        "server_name": "snowden2.78-17-160-83.nip.io",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "firefox"
+        }
+      },
+      "transport": {
+        "type": "grpc",
+        "service_name": "snowden"
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "httpupgrade-nl",
+      "server": "192.109.206.234",
+      "server_port": 20843,
+      "uuid": "1e0e52d1-7935-452c-a868-80308e7ab7d2",
+      "tls": {
+        "enabled": true,
+        "server_name": "snowden-system.192-109-206-234.nip.io",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "firefox"
+        }
+      },
+      "transport": {
+        "type": "httpupgrade",
+        "path": "/snowden",
+        "headers": {
+          "Host": "snowden-system.192-109-206-234.nip.io"
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "httpupgrade-fr",
+      "server": "78.17.160.83",
+      "server_port": 20843,
+      "uuid": "87fefa00-4227-4bfc-b73a-9599e40e3e93",
+      "tls": {
+        "enabled": true,
+        "server_name": "snowden2.78-17-160-83.nip.io",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "firefox"
+        }
+      },
+      "transport": {
+        "type": "httpupgrade",
+        "path": "/snowden",
+        "headers": {
+          "Host": "snowden2.78-17-160-83.nip.io"
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "vless-nl",
+      "server": "192.109.206.234",
+      "server_port": 443,
+      "uuid": "1e0e52d1-7935-452c-a868-80308e7ab7d2",
+      "tls": {
+        "enabled": true,
+        "server_name": "snowden-system.192-109-206-234.nip.io",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "firefox"
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "vless-fr",
+      "server": "78.17.160.83",
+      "server_port": 443,
+      "uuid": "87fefa00-4227-4bfc-b73a-9599e40e3e93",
+      "tls": {
+        "enabled": true,
+        "server_name": "snowden2.78-17-160-83.nip.io",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "firefox"
+        }
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "domain_suffix": [
+          ".ru",
+          ".su",
+          ".рф"
+        ],
+        "action": "direct"
+      },
+      {
+        "domain": [
+          "yandex.ru",
+          "ya.ru",
+          "vk.com",
+          "mail.ru",
+          "ok.ru",
+          "gosuslugi.ru",
+          "sberbank.ru",
+          "sber.ru",
+          "tinkoff.ru",
+          "vtb.ru",
+          "alfabank.ru",
+          "rshb.ru",
+          "gazprombank.ru",
+          "mkb.ru",
+          "pochta.ru",
+          "2gis.ru",
+          "kinopoisk.ru",
+          "passport.yandex.ru",
+          "vkusvill.ru"
+        ],
+        "action": "direct"
+      },
+      {
+        "domain_suffix": [
+          "googlevideo.com",
+          "ytimg.com",
+          "youtube.com",
+          "youtu.be",
+          "googleapis.com",
+          "gstatic.com",
+          "discord.com",
+          "discordapp.com",
+          "discord.gg",
+          "openai.com",
+          "anthropic.com",
+          "claude.ai",
+          "x.ai",
+          "chatgpt.com",
+          "oaistatic.com",
+          "oaiusercontent.com",
+          "twitter.com",
+          "x.com",
+          "facebook.com",
+          "instagram.com",
+          "whatsapp.com",
+          "reddit.com",
+          "twitch.tv",
+          "netflix.com",
+          "spotify.com",
+          "steam.com",
+          "steampowered.com",
+          "steamcommunity.com",
+          "google.com",
+          "googleusercontent.com",
+          "ggpht.com",
+          "github.com",
+          "githubusercontent.com",
+          "aliexpress.com",
+          "aliexpress.ru",
+          "alibaba.com",
+          "amazon.com",
+          "ebay.com",
+          "paypal.com",
+          "tiktok.com",
+          "bytedance.com",
+          "wikipedia.org",
+          "wikimedia.org",
+          "medium.com",
+          "notion.so",
+          "proton.me",
+          "protonmail.com",
+          "signal.org",
+          "cloudflare.com",
+          "fast.com",
+          "speedtest.net"
+        ],
+        "outbound": "auto"
+      },
+      {
+        "domain": [
+          "t.me",
+          "telegram.org"
+        ],
+        "outbound": "auto"
+      },
+      {
+        "ip_cidr": [
+          "91.108.0.0/16",
+          "149.154.0.0/16"
+        ],
+        "outbound": "auto"
+      },
+      {
+        "ip_is_private": true,
+        "action": "direct"
+      }
+    ],
+    "final": "auto",
+    "default_domain_resolver": "local",
+    "auto_detect_interface": true
+  }
+}

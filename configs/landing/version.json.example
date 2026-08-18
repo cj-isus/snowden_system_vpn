@@ -1,0 +1,10 @@
+{
+  "version": "1.0.0",
+  "versionCode": 100,
+  "pc_url": "http://YOUR_VPS_IP:8090/snowden-portable.zip",
+  "android_url": "http://YOUR_VPS_IP:8090/snowden-android.apk",
+  "ios_config_url": "http://YOUR_VPS_IP:8090/snowden-ios-config.json",
+  "singbox_config_url": "http://YOUR_VPS_IP:8090/snowden-android-singbox.json",
+  "amnezia_config_url": "http://YOUR_VPS_IP:8090/snowden-amnezia.conf",
+  "changelog": "Пример версии — замени на актуальную"
+}

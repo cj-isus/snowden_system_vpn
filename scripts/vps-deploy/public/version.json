@@ -1,0 +1,10 @@
+{
+  "version": "1.3.5",
+  "versionCode": 135,
+  "pc_url": "http://89.125.1.217:8090/snowden-portable.zip",
+  "android_url": "http://89.125.1.217:8090/snowden-android.apk",
+  "ios_config_url": "http://89.125.1.217:8090/snowden-ios-config.json",
+  "singbox_config_url": "http://89.125.1.217:8090/snowden-android-singbox.json",
+  "amnezia_config_url": "http://89.125.1.217:8090/snowden-amnezia.conf",
+  "changelog": "v1.3.5"
+}
