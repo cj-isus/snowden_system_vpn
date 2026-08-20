@@ -1,7 +1,10 @@
 """Capture server logs WHILE the probe is running."""
 import paramiko, threading, time, subprocess, sys, os
 
-HOST="192.109.206.234"; PORT=22; USER="root"; PASS="ibi32E5vMy56U1cGCX"
+HOST=os.environ["SNOWDEN_VPS_IP"]
+PORT=int(os.environ.get("SNOWDEN_VPS_SSH_PORT", "22"))
+USER=os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
+PASS=os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
 logs = []
 
 def tail_logs():
@@ -20,9 +23,10 @@ t=threading.Thread(target=tail_logs,daemon=True); t.start()
 print("log tailer started, launching probe...")
 time.sleep(2)
 
-env=dict(os.environ); env["PATH"]="/c/Users/Пользо/go-sdk/go/bin:/c/Users/Пользо/go/bin:"+env.get("PATH","")
-env["GOROOT"]="/c/Users/Пользо/go-sdk/go"
-r=subprocess.run(["bash","-c","cd /d/ОБХОДЫ/unkillable-vpn && go run -tags 'with_awg,with_wireguard,with_utls' ./backend/enginetest/ 2>&1 | tail -8"],
+env=dict(os.environ); env["PATH"] = os.environ.get("SNOWDEN_GO_PATH", env.get("PATH", ""))
+if os.environ.get("GOROOT"):
+    env["GOROOT"] = os.environ["GOROOT"]
+r=subprocess.run(["bash", "-c", "cd \"$SNOWDEN_PROJECT_DIR\" && go run -tags 'with_awg,with_wireguard,with_utls' ./backend/enginetest/ 2>&1 | tail -8"],
                  capture_output=True,text=True,timeout=40,env=env)
 print("=== PROBE OUTPUT ==="); print(r.stdout)
 

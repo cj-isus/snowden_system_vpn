@@ -5,9 +5,9 @@ echo  snowden.system - Android Build Script
 echo ==========================================
 echo.
 
-set PROJECT_DIR=D:\ОБХОДЫ\snowden_android
+set PROJECT_DIR=%~dp0
 set AAR_URL=https://github.com/Leadaxe/sing-box-lx/releases/download/v1.14.0-lx.3/libbox-1.14.0-lx.3.aar
-set AAR_PATH=%PROJECT_DIR%\android\app\libs\libbox.aar
+set AAR_PATH=%PROJECT_DIR%android\app\libs\libbox.aar
 
 echo [1/4] Checking Flutter...
 flutter --version >nul 2>&1
@@ -22,7 +22,7 @@ echo.
 echo [2/4] Checking AAR library...
 if not exist "%AAR_PATH%" (
     echo AAR not found. Downloading...
-    if not exist "%PROJECT_DIR%\android\app\libs" mkdir "%PROJECT_DIR%\android\app\libs"
+    if not exist "%PROJECT_DIR%android\app\libs" mkdir "%PROJECT_DIR%android\app\libs"
     
     echo Downloading from GitHub...
     echo URL: %AAR_URL%
@@ -44,7 +44,15 @@ if not exist "%AAR_PATH%" (
 )
 
 echo.
-echo [3/4] Getting Flutter dependencies...
+echo [3/4] Checking local build profile...
+if not exist "%PROJECT_DIR%config.local.json" (
+    echo ERROR: config.local.json not found.
+    echo Copy config.example.json to config.local.json and fill it locally.
+    exit /b 1
+)
+
+echo.
+echo [4/5] Getting Flutter dependencies...
 cd /d "%PROJECT_DIR%"
 flutter pub get
 if errorlevel 1 (
@@ -53,8 +61,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo [4/4] Building APK...
-flutter build apk --release
+echo [5/5] Building APK with local profile...
+flutter build apk --release --dart-define-from-file=config.local.json
 if errorlevel 1 (
     echo ERROR: Build failed
     exit /b 1
@@ -65,9 +73,9 @@ echo ==========================================
 echo  BUILD SUCCESS!
 echo ==========================================
 echo APK location:
-echo %PROJECT_DIR%\build\app\outputs\flutter-apk\app-release.apk
+echo %PROJECT_DIR%build\app\outputs\flutter-apk\app-release.apk
 echo.
 echo To install on device:
-echo adb install "%PROJECT_DIR%\build\app\outputs\flutter-apk\app-release.apk"
+echo adb install "%PROJECT_DIR%build\app\outputs\flutter-apk\app-release.apk"
 echo.
 pause

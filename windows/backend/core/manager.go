@@ -3,10 +3,11 @@ package core
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	runtimeconfig "snowden-system/backend/config"
 )
 
 // VPNStatus is the JSON-friendly snapshot the UI binds to. Wails generates the
@@ -33,6 +34,8 @@ type Manager struct {
 	// activeConfigID is the label of the config the engine is running (or, when
 	// stopped, the last one it ran). Empty until the first Start.
 	activeConfigID string
+	// activeChannelTag is the exact protected selector default, when present.
+	activeChannelTag string
 
 	// activeConfigJSON keeps the last config we started, so the UI can inspect
 	// servers / route rules without re-reading the file.
@@ -115,6 +118,19 @@ func (m *Manager) stopMetrics() {
 	m.metricsWG.Wait()
 }
 
+// prepareRuntimeConfig normalizes legacy urltest routes into the selector-owned
+// protected route and validates the resulting graph before Engine sees it.
+func prepareRuntimeConfig(raw []byte) ([]byte, error) {
+	normalized, err := runtimeconfig.NormalizeProtectedRoute(raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := runtimeconfig.Validate(normalized, runtimeconfig.ValidationOptions{RequireFailClosed: true}); err != nil {
+		return nil, err
+	}
+	return normalized, nil
+}
+
 // StartVPN starts the engine with a named config payload. configID is a label
 // chosen by the caller (e.g. "eu-1-reality"); it is reported back in Status()
 // and used by the adaptive engine to pick the fallback chain.
@@ -125,8 +141,14 @@ func (m *Manager) StartVPN(configID string, configJSON []byte) error {
 	defer m.mu.Unlock()
 
 	// Own a private immutable snapshot. Callers (Wails/Telegram/tests) may reuse
-	// or mutate their input slice after this method returns.
-	snapshot := append([]byte(nil), configJSON...)
+	// or mutate their input slice after this method returns. Normalize and
+	// validate before starting so a bad remote/imported config cannot replace a
+	// working engine with an invalid or fail-open route.
+	snapshot, err := prepareRuntimeConfig(configJSON)
+	if err != nil {
+		m.lastError = err.Error()
+		return err
+	}
 	if err := m.engine.Start(snapshot); err != nil {
 		if !errors.Is(err, ErrAlreadyRunning) {
 			m.lastError = err.Error()
@@ -134,6 +156,7 @@ func (m *Manager) StartVPN(configID string, configJSON []byte) error {
 		return err
 	}
 	m.activeConfigID = configID
+	m.activeChannelTag = SelectedChannelTag(snapshot)
 	m.activeConfigJSON = snapshot
 	m.lastError = ""
 	m.metrics.Start()
@@ -165,17 +188,60 @@ func (m *Manager) ReloadVPN(configID string, configJSON []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	snapshot := append([]byte(nil), configJSON...)
+	snapshot, err := prepareRuntimeConfig(configJSON)
+	if err != nil {
+		m.lastError = err.Error()
+		return err
+	}
 	if err := m.engine.Reload(snapshot); err != nil {
 		m.lastError = err.Error()
 		return err
 	}
 	m.activeConfigID = configID
+	m.activeChannelTag = SelectedChannelTag(snapshot)
 	m.activeConfigJSON = snapshot
 	m.lastError = ""
 	m.metrics.Start() // reset traffic timers
 	m.startMetrics()
 	return nil
+}
+
+// ApplyChannel changes the protected selector default through the same serialized
+// lifecycle as UI/Telegram reloads. The requested tag must be present in the
+// normalized selector; direct/block are never accepted.
+func (m *Manager) ApplyChannel(channelTag string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.activeConfigJSON) == 0 {
+		return errors.New("no active config")
+	}
+	updated, err := ApplyChannel(m.activeConfigJSON, channelTag)
+	if err != nil {
+		return err
+	}
+	snapshot, err := prepareRuntimeConfig(updated)
+	if err != nil {
+		m.lastError = err.Error()
+		return err
+	}
+	if err := m.engine.Reload(snapshot); err != nil {
+		m.lastError = err.Error()
+		return err
+	}
+	m.activeChannelTag = channelTag
+	m.activeConfigJSON = snapshot
+	m.lastError = ""
+	m.metrics.Start()
+	m.startMetrics()
+	return nil
+}
+
+// ActiveChannel returns the exact selector default shown in diagnostics/UI.
+func (m *Manager) ActiveChannel() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.activeChannelTag
 }
 
 // Status returns the current snapshot for the UI.
@@ -202,24 +268,17 @@ func (m *Manager) SetLogHandler(h LogHandler) {
 func (m *Manager) GetServers() []ServerInfo {
 	m.mu.Lock()
 	cfg := append([]byte(nil), m.activeConfigJSON...)
-	activeID := m.activeConfigID
+	activeChannel := m.activeChannelTag
 	m.mu.Unlock()
 
 	servers := ParseServers(cfg)
 	if len(servers) == 0 {
 		return servers
 	}
-	// Determine which outbound is selected (urltest picks first available).
-	// We mark the first server as active for display purposes.
-	hasActive := false
+	// Mark only the exact selector default as active. Never invent an active
+	// VLESS/first-server state when the runtime has not reported one.
 	for i := range servers {
-		if servers[i].ID == activeID || (!hasActive && strings.Contains(strings.ToLower(servers[i].Name), "vless")) {
-			servers[i].Active = true
-			hasActive = true
-		}
-	}
-	if !hasActive && len(servers) > 0 {
-		servers[0].Active = true
+		servers[i].Active = activeChannel != "" && servers[i].ID == activeChannel
 	}
 	// Ping each server (TCP connect latency).
 	for i := range servers {

@@ -16,8 +16,8 @@ import (
 // contain secrets (no private_key / password) — only type+endpoint+port+version.
 type ChannelRecord struct {
 	Key       string    `json:"key"`
-	OK        int       `json:"ok"`       // consecutive successful checks
-	Fail      int       `json:"fail"`     // consecutive failures
+	OK        int       `json:"ok"`   // consecutive successful checks
+	Fail      int       `json:"fail"` // consecutive failures
 	LastOK    time.Time `json:"lastOk"`
 	LastFail  time.Time `json:"lastFail"`
 	TotalOK   int       `json:"totalOk"`   // lifetime successes
@@ -88,9 +88,19 @@ func (m *ChannelMemory) Score(key string) float64 {
 // Best returns the channel with the highest score among candidates, or "" if
 // the candidate list is empty. Unknown candidates get a neutral score.
 func (m *ChannelMemory) Best(candidates []string) string {
+	return m.BestExcept(candidates, "")
+}
+
+// BestExcept selects the highest-scoring candidate other than excluded. It is
+// used immediately after a failure so the controller explores another
+// validated channel instead of reloading the same endpoint.
+func (m *ChannelMemory) BestExcept(candidates []string, excluded string) string {
 	bestKey := ""
 	bestScore := -1.0
 	for _, k := range candidates {
+		if k == excluded {
+			continue
+		}
 		s := m.Score(k)
 		if s > bestScore {
 			bestScore = s
@@ -186,10 +196,10 @@ func (m *ChannelMemory) EnforceCap() {
 
 // ChannelMemorySummary is a compact view for Diagnostics() / the UI.
 type ChannelMemorySummary struct {
-	Total     int            `json:"total"`      // channels tracked
-	BestKey   string         `json:"bestKey"`    // highest-scoring known channel
-	BestScore float64        `json:"bestScore"`  // its score
-	Top       []ChannelScore `json:"top"`        // top N by score, for the UI
+	Total     int            `json:"total"`     // channels tracked
+	BestKey   string         `json:"bestKey"`   // highest-scoring known channel
+	BestScore float64        `json:"bestScore"` // its score
+	Top       []ChannelScore `json:"top"`       // top N by score, for the UI
 }
 
 // ChannelScore is one channel's score for display.

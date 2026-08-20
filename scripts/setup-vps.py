@@ -2,14 +2,15 @@
 Setup VLESS+Reality on the VPS via SSH (paramiko).
 Runs the hardening + sing-box install + key generation, prints keys for client.
 """
+import os
 import paramiko
 import sys
 import time
 
-HOST = "192.109.206.234"
-PORT = 22
-USER = "root"
-PASS = "ibi32E5vMy56U1cGCX"
+HOST = os.environ["SNOWDEN_VPS_IP"]
+PORT = int(os.environ.get("SNOWDEN_VPS_SSH_PORT", "22"))
+USER = os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
+PASS = os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
 
 def run(client, cmd, timeout=180):
     """Run command, print combined output, return (exit_code, output)."""
@@ -64,11 +65,8 @@ def main():
     _, shortid = run(client, "openssl rand -hex 8")
     shortid = shortid.strip().splitlines()[-1].strip()
 
-    print(f"\n=== GENERATED KEYS ===")
-    print(f"PrivateKey: {priv}")
-    print(f"PublicKey:  {pub}")
-    print(f"UUID:       {uuid}")
-    print(f"ShortID:    {shortid}")
+    print("\n=== GENERATED KEYS ===")
+    print("Generated a fresh server keypair and client profile; credentials are not printed.")
 
     # Step 5: write server config
     print("\n>>> STEP 5: write /etc/sing-box/config.json")
@@ -146,11 +144,11 @@ def main():
   ]
 }}
 '''
-    print("\n=== CLIENT CONFIG (for Snowden_system VPN) ===")
-    print(client_conf)
+    print("\n=== CLIENT CONFIG ===")
+    print("Client profile generated locally; credentials are not printed.")
 
     # save client config locally too
-    with open(r"D:\ОБХОДЫ\unkillable-vpn\assets\configs\template-vps-reality.json", "w", encoding="utf-8") as f:
+    with open(os.environ["SNOWDEN_CLIENT_CONFIG_PATH"], "w", encoding="utf-8") as f:
         # wrap into a full sing-box config with mixed inbound + route
         full = f'''{{
   "log": {{ "level": "info", "timestamp": true }},
@@ -210,7 +208,7 @@ def main():
 }}
 '''
         f.write(full)
-    print(f"\n[client config saved to D:\\ОБХОДЫ\\unkillable-vpn\\assets\\configs\\template-vps-reality.json]")
+    print("client config saved to SNOWDEN_CLIENT_CONFIG_PATH")
 
     client.close()
     print("\n=== DONE ===")

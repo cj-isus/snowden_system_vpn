@@ -2,17 +2,18 @@
 """Replace old VPS servers with the new Netherlands Hysteria2 server in
 every copy of template-vps-reality.json."""
 import json
+import os
 import sys
 
 NEW = {
     "type": "hysteria2",
     "tag": "hysteria2-nl",
-    "server": "89.125.1.217",
-    "server_port": 8443,
-    "password": "u2u65B4QHw8YkXpb5Y",
+    "server": os.environ["SNOWDEN_VPS_IP"],
+    "server_port": int(os.environ.get("SNOWDEN_HY2_PORT", "8443")),
+    "password": os.environ["SNOWDEN_HY2_PASSWORD"],
     "tls": {
         "enabled": True,
-        "server_name": "snowden-system.89-125-1-217.nip.io",
+        "server_name": os.environ["SNOWDEN_VPN_DOMAIN"],
     },
 }
 
@@ -22,12 +23,12 @@ DROPPED = {
 }
 
 paths = [
-    r"D:\ОБХОДЫ\unkillable-vpn\assets\configs\template-vps-reality.json",
-    r"D:\ОБХОДЫ\unkillable-vpn\build\bin\assets\configs\template-vps-reality.json",
-    r"D:\ОБХОДЫ\Snowden_system\snowden-portable\assets\configs\template-vps-reality.json",
+    os.environ["SNOWDEN_RUNTIME_CONFIG_PATH"],
+    os.environ.get("SNOWDEN_BUILD_CONFIG_PATH"),
+    os.environ.get("SNOWDEN_PORTABLE_CONFIG_PATH"),
 ]
 
-for p in paths:
+for p in [path for path in paths if path]:
     with open(p, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
@@ -40,7 +41,8 @@ for p in paths:
         srv = ob.get("server")
         if tag in DROPPED:
             continue
-        if srv in ("78.17.160.83", "192.109.206.234"):
+        old_ip = os.environ.get("SNOWDEN_OLD_VPS_IP")
+        if old_ip and srv == old_ip:
             continue
         kept.append(ob)
     cfg["outbounds"] = kept
@@ -71,7 +73,7 @@ for p in paths:
     assert set(auto["outbounds"]) <= tags, f"auto refs missing in {p}"
     old = json.load(open(p, "r", encoding="utf-8"))
     objs = old["outbounds"]
-    assert all(o.get("server") not in ("78.17.160.83", "192.109.206.234") for o in objs if "server" in o)
+    assert all(o.get("server") != os.environ.get("SNOWDEN_OLD_VPS_IP", "") for o in objs if "server" in o)
     print(f"OK {p}  outbounds={[o.get('tag') for o in objs]}")
 
 print("DONE")

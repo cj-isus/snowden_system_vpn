@@ -8,7 +8,7 @@
         "tag": "cloudflare",
         "server": "1.1.1.1",
         "path": "/dns-query",
-        "detour": "proxy"
+        "detour": "direct"
       },
       {
         "type": "local",

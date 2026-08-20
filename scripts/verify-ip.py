@@ -1,9 +1,14 @@
 """
-Verify what 192.109.206.234 actually is on the server side.
+Verify that the configured VPS address is the server's public endpoint.
 """
+import os
 import paramiko
 
-HOST="192.109.206.234"; PORT=22; USER="root"; PASS="ibi32E5vMy56U1cGCX"
+HOST=os.environ["SNOWDEN_VPS_IP"]
+PORT=int(os.environ.get("SNOWDEN_VPS_SSH_PORT", "22"))
+USER=os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
+PASS=os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
+CURL_HOST = f"[{HOST}]" if ":" in HOST and not HOST.startswith("[") else HOST
 
 c=paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 c.connect(HOST,port=PORT,username=USER,password=PASS,timeout=20,allow_agent=False,look_for_keys=False)
@@ -25,7 +30,7 @@ run("ss -tlnp | grep ':443'")
 
 print("=== Может ли сервер достучаться до себя на 443? ===")
 run("curl -sS --max-time 5 -k https://127.0.0.1:443/ -o /dev/null -w 'localhost 443: %{http_code}\\n' || echo 'localhost 443 FAIL'")
-run("curl -sS --max-time 5 -k https://192.109.206.234:443/ -o /dev/null -w 'public 443: %{http_code}\\n' || echo 'public 443 FAIL'")
+run(f"curl -sS --max-time 5 -k https://{CURL_HOST}:443/ -o /dev/null -w 'public 443: %{{http_code}}\\n' || echo 'public 443 FAIL'")
 
 print("=== hostname / whois IP ===")
 run("hostname")

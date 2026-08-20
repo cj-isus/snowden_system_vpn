@@ -23,21 +23,21 @@ type ServerInfo struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Protocol string `json:"protocol"`
-	Server   string `json:"server"`   // IP/host
+	Server   string `json:"server"` // IP/host
 	Port     int    `json:"port"`
 	Location string `json:"location"` // human label, e.g. "Нидерланды"
 	Active   bool   `json:"active"`
-	Ping     int    `json:"ping"`     // milliseconds, -1 if unknown
+	Ping     int    `json:"ping"` // milliseconds, -1 if unknown
 }
 
 // RouteRuleInfo describes one route rule for the RoutingCard.
 type RouteRuleInfo struct {
-	ID     string `json:"id"`
-	Icon   string `json:"icon"`
-	Title  string `json:"title"`
-	Sub    string `json:"sub"`
-	Route  string `json:"route"` // "Напрямую" | "Через VPN"
-	On     bool   `json:"on"`
+	ID    string `json:"id"`
+	Icon  string `json:"icon"`
+	Title string `json:"title"`
+	Sub   string `json:"sub"`
+	Route string `json:"route"` // "Напрямую" | "Через VPN"
+	On    bool   `json:"on"`
 }
 
 // TrafficStats is the realtime counters for the TrafficCard.
@@ -138,17 +138,17 @@ func (m *Metrics) Stats() TrafficStats {
 
 // ClashConnection represents one active connection from Clash API /connections.
 type ClashConnection struct {
-	ID         string `json:"id"`
-	Upload     int64  `json:"upload"`
-	Download   int64  `json:"download"`
-	Start      string `json:"start"`
-	Chains     []string `json:"chains"`
+	ID       string   `json:"id"`
+	Upload   int64    `json:"upload"`
+	Download int64    `json:"download"`
+	Start    string   `json:"start"`
+	Chains   []string `json:"chains"`
 	Metadata struct {
-		Network  string `json:"network"`
-		Type     string `json:"type"`
+		Network         string `json:"network"`
+		Type            string `json:"type"`
 		DestinationIP   string `json:"destinationIP"`
 		DestinationPort string `json:"destinationPort"`
-		Host     string `json:"host"` // sniffed domain
+		Host            string `json:"host"` // sniffed domain
 	} `json:"metadata"`
 }
 
@@ -170,6 +170,7 @@ func ClashConnections() []ClashConnection {
 	}
 	return data.Connections
 }
+
 // sing-box tracks bytes flowing through every connection and exposes the totals
 // at GET /connections (sum of upload/download). We use the simpler /traffic
 // endpoint which returns {up: N, down: N} per-second rates.
@@ -308,6 +309,14 @@ func ResolveOutboundTag(server string, cfg []byte) (string, error) {
 	}
 
 	if strings.EqualFold(server, "auto") {
+		// AdaptiveController owns the protected choice; "auto" therefore maps
+		// to selector proxy after runtime normalization. Keep urltest as a
+		// compatibility fallback only for diagnostic/legacy configs.
+		for _, ob := range raw.Outbounds {
+			if ob.Type == "selector" && ob.Tag == "proxy" {
+				return "proxy", nil
+			}
+		}
 		for _, ob := range raw.Outbounds {
 			if ob.Type == "urltest" && ob.Tag == "auto" {
 				return "auto", nil
@@ -318,7 +327,7 @@ func ResolveOutboundTag(server string, cfg []byte) (string, error) {
 				return ob.Tag, nil
 			}
 		}
-		return "", fmt.Errorf("no urltest outbound in config")
+		return "", fmt.Errorf("no protected selector or diagnostic urltest in config")
 	}
 
 	code := strings.ToLower(server)
@@ -340,36 +349,24 @@ func ResolveOutboundTag(server string, cfg []byte) (string, error) {
 	return "", fmt.Errorf("no outbound matching %q", server)
 }
 
-// ChannelKeysFromConfig extracts deterministic, secret-free keys for the real
-// (non-control) outbounds in a config, in config order. These feed ChannelMemory
-// so the engine can remember per-channel health. WireGuard WARP endpoints are
-// not outbounds here; the primary VPS outbound is the one that matters most.
+// ChannelKeysFromConfig extracts deterministic, secret-free keys for the
+// protected selector candidates in config order. Endpoint addresses are hashed
+// by ChannelKey, so persisted memory never stores server IPs or credentials.
 func ChannelKeysFromConfig(cfg []byte) []string {
-	var raw struct {
-		Outbounds []struct {
-			Type       string `json:"type"`
-			Tag        string `json:"tag"`
-			Server     string `json:"server"`
-			ServerPort int    `json:"server_port"`
-		} `json:"outbounds"`
-	}
-	if err := json.Unmarshal(cfg, &raw); err != nil {
-		return nil
-	}
-	skip := map[string]bool{"direct": true, "block": true, "urltest": true, "selector": true, "dns": true}
-	var keys []string
-	for _, ob := range raw.Outbounds {
-		if skip[ob.Type] || ob.Server == "" {
-			continue
-		}
-		keys = append(keys, fmt.Sprintf("%s:%s:%d", ob.Type, ob.Server, ob.ServerPort))
+	channels := ProtectedChannels(cfg)
+	keys := make([]string, 0, len(channels))
+	for _, channel := range channels {
+		keys = append(keys, ChannelKey(channel))
 	}
 	return keys
 }
 
-// PrimaryChannelKeyFromConfig returns the key of the first real outbound (the
-// primary channel, e.g. the VPS entry) or "" if none.
+// PrimaryChannelKeyFromConfig returns the key of the actually selected protected
+// channel. It falls back to the first candidate only for legacy diagnostics.
 func PrimaryChannelKeyFromConfig(cfg []byte) string {
+	if selected := SelectedChannelKey(cfg); selected != "" {
+		return selected
+	}
 	keys := ChannelKeysFromConfig(cfg)
 	if len(keys) == 0 {
 		return ""
@@ -469,7 +466,7 @@ func iconForDomains(suffixes []any) string {
 			return "🎮"
 		case strings.Contains(str, "openai") || strings.Contains(str, "claude") || strings.Contains(str, "anthropic"):
 			return "🤖"
-		case strings.Contains(str, "twitter") || strings.Contains(str, "x.com"):
+		case strings.Contains(str, "twitter") || str == "x.com" || strings.HasSuffix(str, ".x.com"):
 			return "🐦"
 		case strings.Contains(str, "telegram") || strings.Contains(str, "t.me"):
 			return "📱"

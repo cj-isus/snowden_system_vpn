@@ -157,8 +157,11 @@ func (l logEmitter) OnLog(line string) {
 	// sing-box logs: "sniffed protocol: tls, domain: youtube.com"
 	if l.manager != nil {
 		if domain, ok := extractDomainFromLog(line); ok {
-			// Determine which outbound is active (auto → currently vless or hysteria2)
-			l.manager.RecordDomainStat(domain, "auto", 0, 0, !containsStr(line, "[error]"))
+			outbound := l.manager.ActiveChannel()
+			if outbound == "" {
+				outbound = "unknown"
+			}
+			l.manager.RecordDomainStat(domain, outbound, 0, 0, !containsStr(line, "[error]"))
 		}
 	}
 }
@@ -233,7 +236,9 @@ func (a *App) StartVPN(configID string, configJSON string) error {
 	} else {
 		log.Printf("[StartVPN] system proxy → 127.0.0.1:20808")
 	}
-	a.adaptive.Start(configID, []byte(configJSON))
+	// Manager owns normalization; give AdaptiveEngine the exact snapshot that
+	// was validated and started, not the caller's legacy urltest JSON.
+	a.adaptive.Start(configID, a.manager.ActiveConfigJSON())
 	return nil
 }
 
@@ -254,8 +259,8 @@ func (a *App) ReloadVPN(configID string, configJSON string) error {
 	if err := a.manager.ReloadVPN(configID, config); err != nil {
 		return err
 	}
-	// Keep adaptive recovery on the same snapshot after a UI/Telegram reload.
-	a.adaptive.UpdateConfig(configID, config)
+	// Keep adaptive recovery on the same normalized snapshot after a UI/Telegram reload.
+	a.adaptive.UpdateConfig(configID, a.manager.ActiveConfigJSON())
 	return nil
 }
 
@@ -354,7 +359,7 @@ func (a *App) CheckForUpdate() (map[string]any, error) {
 	remoteVer := remote["version"]
 	hasUpdate := remoteVer != "" && remoteVer != LOCAL_VERSION
 	return map[string]any{
-		"hasUpdate":    hasUpdate,
+		"hasUpdate":     hasUpdate,
 		"localVersion":  LOCAL_VERSION,
 		"remoteVersion": remoteVer,
 		"downloadUrl":   remote["downloadUrl"],
@@ -362,43 +367,33 @@ func (a *App) CheckForUpdate() (map[string]any, error) {
 	}, nil
 }
 
-// SelectServer changes the active server. "auto" = urltest (default),
-// "nl" = Нидерланды only, "fr" = Франция only.
-// Rebuilds the route.final and reloads sing-box.
+// SelectServer changes the active protected selector channel. "auto" keeps
+// the selector-owned policy; explicit names resolve against actual config tags.
 func (a *App) SelectServer(server string) error {
 	cfg := a.manager.ActiveConfigJSON()
 	if len(cfg) == 0 {
 		return fmt.Errorf("no active config")
 	}
 
-	var config map[string]any
-	if err := json.Unmarshal(cfg, &config); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-
-	route, ok := config["route"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("no route section")
-	}
-
-	// Map friendly name to outbound tag by resolving against the ACTUAL
-	// outbounds in config (the config is the source of truth, not hardcoded
-	// names). "auto" → urltest group; "nl"/"fr" → tag containing the code.
-	finalOutbound, err := core.ResolveOutboundTag(server, cfg)
+	channelTag, err := core.ResolveOutboundTag(server, cfg)
 	if err != nil {
 		return fmt.Errorf("resolve server %q: %w", server, err)
 	}
-
-	route["final"] = finalOutbound
-	config["route"] = route
-
-	newCfg, err := json.Marshal(config)
+	if channelTag == "auto" {
+		// Legacy configs are normalized by Manager; an explicit reload here keeps
+		// the route final on selector proxy rather than returning to urltest.
+		channelTag = core.SelectedChannelTag(cfg)
+		if channelTag == "" {
+			return fmt.Errorf("protected selector has no selected channel")
+		}
+	}
+	updated, err := core.ApplyChannel(cfg, channelTag)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return fmt.Errorf("select protected channel %q: %w", channelTag, err)
 	}
 
-	log.Printf("[SelectServer] → %s (final=%s), reloading", server, finalOutbound)
-	return a.ReloadVPN(a.manager.Status().ConfigID, string(newCfg))
+	log.Printf("[SelectServer] → %s (channel=%s), reloading selector", server, channelTag)
+	return a.ReloadVPN(a.manager.Status().ConfigID, string(updated))
 }
 
 // ToggleRouteRule enables/disables a route rule by index and reloads the config.

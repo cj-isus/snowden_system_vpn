@@ -50,12 +50,24 @@ class _HomeScreenState extends State<HomeScreen>
   late AnimationController _pulseController;
   Timer? _statusTimer;
 
-  // Android VPN config — TUN inbound for VpnService integration
-  final String _config = jsonEncode({
+  // Runtime credentials are injected only at local build time with
+  // --dart-define-from-file=android/config.local.json. No server IP, UUID or
+  // password belongs in the repository or in the default binary.
+  static const String _server = String.fromEnvironment('SNOWDEN_VPS_IP');
+  static const String _uuid = String.fromEnvironment('SNOWDEN_VPS_UUID');
+  static const String _password = String.fromEnvironment('SNOWDEN_HY2_PASSWORD');
+  static const String _domain = String.fromEnvironment('SNOWDEN_VPN_DOMAIN');
+
+  bool get _configReady =>
+      _server.isNotEmpty && _uuid.isNotEmpty && _password.isNotEmpty && _domain.isNotEmpty;
+
+  // Android VPN config — selector-owned TUN route. Protected traffic never
+  // falls back to direct; only explicit RU/private rules use direct.
+  String get _config => jsonEncode({
     "log": {"level": "info", "timestamp": true},
     "dns": {
       "servers": [
-        {"type": "https", "tag": "cloudflare", "server": "1.1.1.1", "path": "/dns-query", "detour": "auto"},
+        {"type": "https", "tag": "cloudflare", "server": "1.1.1.1", "path": "/dns-query", "detour": "proxy"},
         {"type": "local", "tag": "local", "detour": "direct"}
       ],
       "rules": [{"outbound": "any", "server": "local"}],
@@ -76,33 +88,31 @@ class _HomeScreenState extends State<HomeScreen>
     ],
     "outbounds": [
       {
-        "type": "urltest",
-        "tag": "auto",
-        "outbounds": ["vless-tls", "hysteria2", "direct"],
-        "url": "https://www.gstatic.com/generate_204",
-        "interval": "30s",
-        "tolerance": 10
+        "type": "selector",
+        "tag": "proxy",
+        "outbounds": ["vless-tls", "hysteria2"],
+        "default": "vless-tls"
       },
       {
         "type": "vless",
         "tag": "vless-tls",
-        "server": "192.109.206.234",
+        "server": _server,
         "server_port": 443,
-        "uuid": "1e0e52d1-7935-452c-a868-80308e7ab7d2",
+        "uuid": _uuid,
         "tls": {
           "enabled": true,
-          "server_name": "snowden-system.192-109-206-234.nip.io"
+          "server_name": _domain
         }
       },
       {
         "type": "hysteria2",
         "tag": "hysteria2",
-        "server": "192.109.206.234",
+        "server": _server,
         "server_port": 8443,
-        "password": "l8Szewrr9kVtlRyP",
+        "password": _password,
         "tls": {
           "enabled": true,
-          "server_name": "snowden-system.192-109-206-234.nip.io"
+          "server_name": _domain
         }
       },
       {"type": "direct", "tag": "direct"},
@@ -114,13 +124,13 @@ class _HomeScreenState extends State<HomeScreen>
         {"action": "hijack-dns", "inbound": "tun-in", "protocol": "dns"},
         {"domain_suffix": [".ru", ".su", ".рф"], "action": "direct"},
         {"domain": ["yandex.ru", "vk.com", "mail.ru", "sberbank.ru", "tinkoff.ru", "gosuslugi.ru"], "action": "direct"},
-        {"domain_suffix": ["googlevideo.com", "youtube.com", "youtu.be"], "outbound": "auto"},
-        {"domain": ["t.me", "telegram.org"], "outbound": "auto"},
-        {"domain_suffix": ["discord.com", "discord.gg"], "outbound": "auto"},
-        {"domain_suffix": ["twitter.com", "x.com", "instagram.com"], "outbound": "auto"},
+        {"domain_suffix": ["googlevideo.com", "youtube.com", "youtu.be"], "outbound": "proxy"},
+        {"domain": ["t.me", "telegram.org"], "outbound": "proxy"},
+        {"domain_suffix": ["discord.com", "discord.gg"], "outbound": "proxy"},
+        {"domain_suffix": ["twitter.com", "x.com", "instagram.com"], "outbound": "proxy"},
         {"ip_is_private": true, "action": "direct"}
       ],
-      "final": "auto",
+      "final": "proxy",
       "auto_detect_interface": true
     }
   });
@@ -171,6 +181,12 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _toggleVPN() async {
     if (_connecting) return;
+    if (!_configReady) {
+      setState(() {
+        _subStatus = 'Нет локального профиля: соберите с config.local.json';
+      });
+      return;
+    }
     setState(() => _connecting = true);
 
     try {

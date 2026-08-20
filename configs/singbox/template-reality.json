@@ -27,7 +27,7 @@
     {
       "type": "selector",
       "tag": "proxy",
-      "outbounds": ["direct-vless", "direct"],
+      "outbounds": ["direct-vless"],
       "default": "direct-vless"
     },
     {

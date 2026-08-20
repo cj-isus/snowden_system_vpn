@@ -2,14 +2,15 @@
 Diagnose why the VPS Reality endpoint may not accept client connections.
 Checks: server sing-box status, port 443, recent logs, and a direct TCP probe.
 """
+import os
 import paramiko
 import socket
 import time
 
-HOST = "192.109.206.234"
-PORT = 22
-USER = "root"
-PASS = "ibi32E5vMy56U1cGCX"
+HOST = os.environ["SNOWDEN_VPS_IP"]
+PORT = int(os.environ.get("SNOWDEN_VPS_SSH_PORT", "22"))
+USER = os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
+PASS = os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
 
 def run(c, cmd, t=30):
     _, stdout, stderr = c.exec_command(cmd, timeout=t, get_pty=True)
@@ -47,7 +48,7 @@ c.close()
 
 print("=== 7. TCP probe to 443 from local machine ===")
 try:
-    s = socket.create_connection(("192.109.206.234", 443), timeout=10)
+    s = socket.create_connection((HOST, 443), timeout=10)
     # send a TLS ClientHello-ish byte to see if we get a TLS ServerHello (Reality answers as the dest site)
     s.sendall(bytes.fromhex("16030100") + b"\x00"*100)
     data = s.recv(32)

@@ -3,17 +3,23 @@ Derive the correct public key from the server's private key and compare with
 what the client is using. sing-box's reality-keypair derives pub from priv via
 x25519, so we can compute it locally too — but easiest is to ask the server.
 """
+import os
 import paramiko
 
-HOST="192.109.206.234"; PORT=22; USER="root"; PASS="ibi32E5vMy56U1cGCX"
+HOST = os.environ["SNOWDEN_VPS_IP"]
+PORT = int(os.environ.get("SNOWDEN_VPS_SSH_PORT", "22"))
+USER = os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
+PASS = os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
 
 c=paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 c.connect(HOST,port=PORT,username=USER,password=PASS,timeout=20,allow_agent=False,look_for_keys=False)
 
 # Method 1: sing-box on the server doesn't have a "derive pubkey from privkey" cmd,
 # so compute via python cryptography (x25519).
-privkey_b64 = "CCdumiIFHkvJraSvCmcPOVC_XkjuiyvgMt-9X59zBls"
-print(f"server private_key: {privkey_b64}")
+privkey_b64 = os.environ.get("SNOWDEN_REALITY_PRIVATE_KEY", "")
+if not privkey_b64:
+    print("SNOWDEN_REALITY_PRIVATE_KEY is not set; skipping local private-key derivation")
+print("local private-key derivation input: configured" if privkey_b64 else "local private-key derivation input: not configured")
 
 try:
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -24,7 +30,7 @@ try:
     # URL-safe → standard (-_ → +/)
     std = padded.replace("-", "+").replace("_", "/")
     priv_bytes = base64.b64decode(std)
-    print(f"priv raw bytes ({len(priv_bytes)}): {priv_bytes.hex()}")
+    print(f"private-key input length: {len(priv_bytes)} bytes")
     if len(priv_bytes) == 32:
         sk = X25519PrivateKey.from_private_bytes(priv_bytes)
         pub_bytes = sk.public_key().public_bytes(
@@ -49,8 +55,8 @@ priv=pub=""
 for line in out.splitlines():
     if "PrivateKey" in line: priv=line.split()[-1]
     if "PublicKey" in line: pub=line.split()[-1]
-print(f"\nFRESH PrivateKey: {priv}")
-print(f"FRESH PublicKey:  {pub}")
+print("fresh keypair generated on server; private key is not printed")
+print("fresh public key captured for local config")
 
 # Write the fresh pair to the server config (overwrite)
 import json
@@ -58,11 +64,11 @@ cfg = {
   "log": {"level":"info","timestamp":True},
   "inbounds":[{
     "type":"vless","tag":"vless-in","listen":"::","listen_port":443,
-    "users":[{"uuid":"1e0e52d1-7935-452c-a868-80308e7ab7d2","flow":"xtls-rprx-vision"}],
+    "users":[{"uuid":os.environ["SNOWDEN_VPS_UUID"],"flow":"xtls-rprx-vision"}],
     "tls":{"enabled":True,"server_name":"www.microsoft.com",
       "reality":{"enabled":True,
         "handshake":{"server":"www.microsoft.com","server_port":443},
-        "private_key":priv,"short_id":["5d1641b2a6e3d562"]}}
+        "private_key":priv,"short_id":[os.environ["SNOWDEN_REALITY_SHORT_ID"]]}}
   }],
   "outbounds":[{"type":"direct","tag":"direct"}]
 }
@@ -87,10 +93,10 @@ client_cfg = {
   "inbounds":[{"type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":20808}],
   "outbounds":[
     {"type":"vless","tag":"proxy","server":HOST,"server_port":443,
-     "uuid":"1e0e52d1-7935-452c-a868-80308e7ab7d2","flow":"xtls-rprx-vision",
+     "uuid":os.environ["SNOWDEN_VPS_UUID"],"flow":"xtls-rprx-vision",
      "tls":{"enabled":True,"server_name":"www.microsoft.com",
        "utls":{"enabled":True,"fingerprint":"chrome"},
-       "reality":{"enabled":True,"public_key":pub,"short_id":"5d1641b2a6e3d562"}}},
+       "reality":{"enabled":True,"public_key":pub,"short_id":os.environ["SNOWDEN_REALITY_SHORT_ID"]}}},
     {"type":"direct","tag":"direct"},
     {"type":"block","tag":"block"}
   ],
@@ -100,14 +106,15 @@ client_cfg = {
     {"ip_is_private":True,"action":"direct"}
   ],"final":"proxy","default_domain_resolver":"local","auto_detect_interface":True}
 }
-with open(r"D:\ОБХОДЫ\unkillable-vpn\assets\configs\template-vps-reality.json","w",encoding="utf-8") as f:
+with open(os.environ["SNOWDEN_CLIENT_CONFIG_PATH"], "w", encoding="utf-8") as f:
     json.dump(client_cfg,f,indent=2,ensure_ascii=False)
 print("\nclient config rewritten with matching public_key")
 
 # also copy next to the exe
 import shutil, os
-os.makedirs(r"D:\ОБХОДЫ\unkillable-vpn\build\bin\assets\configs",exist_ok=True)
-shutil.copy(r"D:\ОБХОДЫ\unkillable-vpn\assets\configs\template-vps-reality.json",
-            r"D:\ОБХОДЫ\unkillable-vpn\build\bin\assets\configs\template-vps-reality.json")
+build_config_path = os.environ.get("SNOWDEN_BUILD_CONFIG_PATH")
+if build_config_path:
+    os.makedirs(os.path.dirname(build_config_path), exist_ok=True)
+    shutil.copy(os.environ["SNOWDEN_CLIENT_CONFIG_PATH"], build_config_path)
 print("copied to build/bin/assets/configs/")
-print(f"\nUSE public_key on client: {pub}")
+print("client config updated with the generated public key")

@@ -37,6 +37,10 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   static const _channel = MethodChannel('snowden.system/vpn');
+  static const _server = String.fromEnvironment('SNOWDEN_VPS_IP');
+  static const _uuid = String.fromEnvironment('SNOWDEN_VPS_UUID');
+  static const _hy2Password = String.fromEnvironment('SNOWDEN_HY2_PASSWORD');
+  static const _domain = String.fromEnvironment('SNOWDEN_VPN_DOMAIN');
 
   bool _connected = false;
   bool _connecting = false;
@@ -160,34 +164,32 @@ class _HomeScreenState extends State<HomeScreen>
       ],
       "outbounds": [
         {
-          "type": "urltest",
-          "tag": "auto",
+          "type": "selector",
+          "tag": "proxy",
           "outbounds": ["vless", "hysteria2"],
-          "url": "https://www.gstatic.com/generate_204",
-          "interval": "30s",
-          "tolerance": 50
+          "default": "vless"
         },
         {
           "type": "vless",
           "tag": "vless",
-          "server": "192.109.206.234",
+          "server": _server,
           "server_port": 443,
-          "uuid": "1e0e52d1-7935-452c-a868-80308e7ab7d2",
+          "uuid": _uuid,
           "tls": {
             "enabled": true,
-            "server_name": "snowden-system.192-109-206-234.nip.io",
+            "server_name": _domain,
             "alpn": ["h2", "http/1.1"]
           }
         },
         {
           "type": "hysteria2",
           "tag": "hysteria2",
-          "server": "192.109.206.234",
+          "server": _server,
           "server_port": 8443,
-          "password": "l8Szewrr9kVtlRyP",
+          "password": _hy2Password,
           "tls": {
             "enabled": true,
-            "server_name": "snowden-system.192-109-206-234.nip.io",
+            "server_name": _domain,
             "alpn": ["h3"]
           }
         },
@@ -226,15 +228,15 @@ class _HomeScreenState extends State<HomeScreen>
             "whatsapp.com", "reddit.com",
             "twitch.tv", "netflix.com", "spotify.com",
             "steam.com", "steampowered.com", "steamcommunity.com"
-          ], "outbound": "auto"},
-          {"domain": ["t.me", "telegram.org"], "outbound": "auto"},
+          ], "outbound": "proxy"},
+          {"domain": ["t.me", "telegram.org"], "outbound": "proxy"},
           {"ip_cidr": [
             "91.108.0.0/16", "149.154.0.0/16",
             "185.76.151.0/24"
-          ], "outbound": "auto"},
+          ], "outbound": "proxy"},
           {"ip_is_private": true, "action": "direct"}
         ],
-        "final": "auto",
+        "final": "proxy",
         "default_domain_resolver": "local",
         "auto_detect_interface": true
       }

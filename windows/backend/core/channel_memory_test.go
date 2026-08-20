@@ -105,10 +105,11 @@ func TestChannelKeysFromConfig(t *testing.T) {
 		map[string]string{"type": "block", "tag": "block"},
 	)
 	keys := ChannelKeysFromConfig(cfg)
-	if len(keys) != 1 || keys[0] != "hysteria2:89.125.1.217:8443" {
-		t.Fatalf("ChannelKeysFromConfig = %v, want [hysteria2:89.125.1.217:8443]", keys)
+	want := ChannelKey(ChannelDescriptor{ID: "hysteria2-nl", Tag: "hysteria2-nl", Type: "hysteria2", Server: "89.125.1.217", Port: 8443})
+	if len(keys) != 1 || keys[0] != want {
+		t.Fatalf("ChannelKeysFromConfig = %v, want [%s]", keys, want)
 	}
-	if PrimaryChannelKeyFromConfig(cfg) != "hysteria2:89.125.1.217:8443" {
+	if PrimaryChannelKeyFromConfig(cfg) != want {
 		t.Fatal("PrimaryChannelKeyFromConfig mismatch")
 	}
 }

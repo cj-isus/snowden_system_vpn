@@ -444,9 +444,40 @@ func (ae *AdaptiveEngine) primaryChannelKey() string {
 	return PrimaryChannelKeyFromConfig(cfg)
 }
 
+// chooseRecoveryConfig selects the best alternative protected candidate after
+// the currently selected channel fails. It never returns direct/block and keeps
+// the original snapshot when no alternative exists.
+func (ae *AdaptiveEngine) chooseRecoveryConfig(cfg []byte) ([]byte, string) {
+	channels := ProtectedChannels(cfg)
+	if len(channels) < 2 {
+		return cfg, ""
+	}
+	keys := make([]string, 0, len(channels))
+	byKey := make(map[string]ChannelDescriptor, len(channels))
+	for _, channel := range channels {
+		key := ChannelKey(channel)
+		keys = append(keys, key)
+		byKey[key] = channel
+	}
+	failed := SelectedChannelKey(cfg)
+	best := ae.memory.BestExcept(keys, failed)
+	if best == "" {
+		return cfg, ""
+	}
+	channel, ok := byKey[best]
+	if !ok {
+		return cfg, ""
+	}
+	selected, err := ApplyChannel(cfg, channel.Tag)
+	if err != nil {
+		return cfg, ""
+	}
+	return selected, channel.Tag
+}
+
 // onCircuitOpen handles the transition to FAILED state. It asks the Manager /
-// Application lifecycle to re-apply the protected channel. There is deliberately
-// no direct fallback here: protected traffic must fail closed.
+// Application lifecycle to apply the next validated protected channel. There is
+// deliberately no direct fallback here: protected traffic must fail closed.
 func (ae *AdaptiveEngine) onCircuitOpen(cat ErrorCategory) {
 	ae.mu.Lock()
 	cfgID := ae.configID
@@ -454,9 +485,15 @@ func (ae *AdaptiveEngine) onCircuitOpen(cat ErrorCategory) {
 	recovery := ae.recovery
 	ae.mu.Unlock()
 
-	// Remember the primary channel as failed so it is not preferred first.
-	if k := PrimaryChannelKeyFromConfig(cfg); k != "" {
+	// Remember the actually selected channel as failed so it is not preferred
+	// first after restart or the next recovery attempt.
+	if k := SelectedChannelKey(cfg); k != "" {
 		ae.memory.Record(k, false)
+	}
+	candidateConfig, candidateTag := ae.chooseRecoveryConfig(cfg)
+	if candidateTag != "" {
+		ae.emit("engine:diag", fmt.Sprintf("[diag] 🔀 trying protected channel %s", candidateTag))
+		cfg = candidateConfig
 	}
 
 	ae.emit("engine:diag", fmt.Sprintf("[diag] 🔴 circuit OPEN — %s: %s",
@@ -487,6 +524,12 @@ func (ae *AdaptiveEngine) onCircuitOpen(cat ErrorCategory) {
 		err := reloadErr
 		ae.emit("engine:diag", fmt.Sprintf("[diag] reload failed: %v", err))
 	} else {
+		// The candidate is now the active recovery snapshot even if the quick
+		// probe below fails; the next attempt must not silently return to the
+		// channel that just failed.
+		ae.mu.Lock()
+		ae.config = append(ae.config[:0], cfg...)
+		ae.mu.Unlock()
 		ae.emit("engine:diag", "[diag] reload OK — probing to verify...")
 		// Quick probe after reload (shorter timeout), interruptible by Stop.
 		if !waitForContext(ae.runContext(), 2*time.Second) {
@@ -503,7 +546,11 @@ func (ae *AdaptiveEngine) onCircuitOpen(cat ErrorCategory) {
 
 	// No direct/urltest fallback is claimed here. The selector/controller must
 	// choose another validated protected channel, or the route remains blocked.
-	ae.emit("engine:diag", "[diag] ⛔ protected channel unavailable — keeping fail-closed policy")
+	if candidateTag == "" {
+		ae.emit("engine:diag", "[diag] ⛔ no alternative protected channel — keeping fail-closed policy")
+	} else {
+		ae.emit("engine:diag", "[diag] ⛔ protected channel unavailable — keeping fail-closed policy")
+	}
 }
 
 // deepProbe sends an HTTP request through the mixed-in proxy and returns
@@ -617,7 +664,7 @@ func (ae *AdaptiveEngine) Diagnostics() DiagStatus {
 	ae.mu.Unlock()
 	fails, oks, _ := cb.Counters()
 	return DiagStatus{
-		State:       ae.cb.StateName(),
+		State:       cb.StateName(),
 		Category:    cat.String(),
 		Explanation: cat.HumanExplain(),
 		LastError:   ae.classifier.LastError(),

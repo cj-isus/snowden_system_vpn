@@ -17,21 +17,21 @@ import os, sys, subprocess, json, shutil, re, time
 
 # ═══════════════════════════════════════════════
 PC_DIR       = r"D:\ОБХОДЫ\unkillable-vpn"
-ANDROID_DIR  = r"D:\snowden_android_short"
-ANDROID_DIR2 = r"D:\snowden_build"
+ANDROID_DIR  = os.environ.get("SNOWDEN_ANDROID_DIR", os.path.join(os.path.dirname(__file__), "..", "android"))
+ANDROID_DIR2 = os.environ.get("SNOWDEN_ANDROID_FALLBACK_DIR", ANDROID_DIR)
 PORTABLE_DIR = r"D:\ОБХОДЫ\Snowden_system\snowden-portable"
 PAGES_DIR    = os.path.join(PC_DIR, "cloudflare", "pages")
 VERSION_FILE = r"D:\ОБХОДЫ\Snowden_system\version.txt"
 
-VPS_IP   = "192.109.206.234"
-VPS_USER = "root"
-VPS_PASS = "kzF40q45rVNuAp2i6UpH"
+VPS_IP   = os.environ["SNOWDEN_VPS_IP"]
+VPS_USER = os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
+VPS_PASS = os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
 
 GO_BIN    = r"C:\Users\Пользо\go-sdk\go\bin"
 WAILS_BIN = r"C:\Users\Пользо\go\bin"
 JAVA_HOME = r"C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot"
-FLUTTER   = r"D:\flutter_sdk\bin\flutter.bat"
-ADB       = r"C:\Users\Пользо\Android\Sdk\platform-tools\adb.exe"
+FLUTTER   = os.environ.get("FLUTTER_BIN", "flutter")
+ADB       = os.environ.get("ADB_BIN", "adb")
 TAGS      = "with_awg,with_wireguard,with_utls,with_gvisor"
 
 # ═══════════════════════════════════════════════
@@ -129,7 +129,7 @@ def main():
 
     # ═══ 2. Android ═══
     step(2, "Android build (flutter)")
-    android_ok = run(f'"{FLUTTER}" build apk --release', cwd=ANDROID_DIR, env=fl_env)
+    android_ok = run(f'"{FLUTTER}" build apk --release --dart-define-from-file=config.local.json', cwd=ANDROID_DIR, env=fl_env)
     if not android_ok and os.path.exists(ANDROID_DIR2):
         print("  Primary dir locked, trying snowden_build...")
         # Sync ALL source files to snowden_build
@@ -154,7 +154,7 @@ def main():
         build_dir = os.path.join(ANDROID_DIR2, "build")
         if os.path.exists(build_dir):
             subprocess.run(f'rd /s /q "{build_dir}"', shell=True, capture_output=True)
-        android_ok = run(f'"{FLUTTER}" build apk --release', cwd=ANDROID_DIR2, env=fl_env)
+        android_ok = run(f'"{FLUTTER}" build apk --release --dart-define-from-file=config.local.json', cwd=ANDROID_DIR2, env=fl_env)
         ANDROID_USED = ANDROID_DIR2
     else:
         ANDROID_USED = ANDROID_DIR

@@ -2,9 +2,13 @@
 Diagnose why VPS accepts Reality handshake but doesn't deliver traffic.
 Check: server can reach internet, sing-box logs for connection attempts.
 """
+import os
 import paramiko, time
 
-HOST="192.109.206.234"; PORT=22; USER="root"; PASS="ibi32E5vMy56U1cGCX"
+HOST=os.environ["SNOWDEN_VPS_IP"]
+PORT=int(os.environ.get("SNOWDEN_VPS_SSH_PORT", "22"))
+USER=os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
+PASS=os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
 
 def run(c,cmd,t=30):
     _,o,e=c.exec_command(cmd,timeout=t,get_pty=True)

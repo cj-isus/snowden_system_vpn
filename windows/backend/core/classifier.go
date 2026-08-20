@@ -10,15 +10,15 @@ import (
 type ErrorCategory int
 
 const (
-	CatHealthy ErrorCategory = iota
-	CatNetworkDown    // local internet is dead
-	CatServerDown     // VPS unreachable
-	CatDNSFailure     // DNS resolution failing
-	CatTLSFailure     // TLS handshake failed
-	CatServerBlocked  // DPI/TSPU blocking
-	CatWhitelistMode  // whitelist (БС) detected
-	CatDegraded       // works but slow
-	CatUnknown        // unrecognised error
+	CatHealthy       ErrorCategory = iota
+	CatNetworkDown                 // local internet is dead
+	CatServerDown                  // VPS unreachable
+	CatDNSFailure                  // DNS resolution failing
+	CatTLSFailure                  // TLS handshake failed
+	CatServerBlocked               // DPI/TSPU blocking
+	CatWhitelistMode               // whitelist (БС) detected
+	CatDegraded                    // works but slow
+	CatUnknown                     // unrecognised error
 )
 
 // String returns a human-readable name for the UI.
@@ -80,11 +80,11 @@ type DiagEvent struct {
 // ErrorCategory values, and maintains a rolling history. The AdaptiveEngine
 // reads the latest category to drive its circuit-breaker decisions.
 type ErrorClassifier struct {
-	mu          sync.Mutex
-	current     ErrorCategory
-	lastError   string
-	events      []DiagEvent
-	maxEvents   int
+	mu        sync.Mutex
+	current   ErrorCategory
+	lastError string
+	events    []DiagEvent
+	maxEvents int
 }
 
 // NewErrorClassifier creates a classifier with a rolling buffer of maxEvents.
@@ -199,8 +199,8 @@ func classify(line string) ErrorCategory {
 	// Connection reset by DPI/TSPU
 	if strings.Contains(lower, "connection reset") ||
 		strings.Contains(lower, "wsarecv: an existing connection was forcibly closed") {
-		// This alone is ambiguous — could be normal (app closing conn).
-		// Only flag if it's on an outbound connection.
+		// A raw Winsock reset is ambiguous: it can be an inbound client closing
+		// its socket. Only classify it when the log identifies an outbound path.
 		if strings.Contains(lower, "outbound") || strings.Contains(lower, "vless") {
 			return CatServerBlocked
 		}
