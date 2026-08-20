@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -290,9 +291,95 @@ func ParseServers(configJSON []byte) []ServerInfo {
 	return result
 }
 
+// ResolveOutboundTag maps a friendly server name to an actual outbound tag
+// present in the config. "auto" always resolves to the urltest group. Other
+// names resolve by country-code substring (exact tag match preferred, then
+// contains), so renaming a tag in config never silently routes traffic to a
+// nonexistent outbound. This replaces the old hardcoded "nl"→"grpc-nl" map.
+func ResolveOutboundTag(server string, cfg []byte) (string, error) {
+	var raw struct {
+		Outbounds []struct {
+			Type string `json:"type"`
+			Tag  string `json:"tag"`
+		} `json:"outbounds"`
+	}
+	if err := json.Unmarshal(cfg, &raw); err != nil {
+		return "", fmt.Errorf("parse config outbounds: %w", err)
+	}
+
+	if strings.EqualFold(server, "auto") {
+		for _, ob := range raw.Outbounds {
+			if ob.Type == "urltest" && ob.Tag == "auto" {
+				return "auto", nil
+			}
+		}
+		for _, ob := range raw.Outbounds {
+			if ob.Type == "urltest" {
+				return ob.Tag, nil
+			}
+		}
+		return "", fmt.Errorf("no urltest outbound in config")
+	}
+
+	code := strings.ToLower(server)
+	// Exact tag match first.
+	for _, ob := range raw.Outbounds {
+		if strings.EqualFold(ob.Tag, code) {
+			return ob.Tag, nil
+		}
+	}
+	// Then contains (country code substring), excluding control outbounds.
+	for _, ob := range raw.Outbounds {
+		if ob.Type == "direct" || ob.Type == "block" || ob.Type == "selector" || ob.Type == "urltest" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(ob.Tag), code) {
+			return ob.Tag, nil
+		}
+	}
+	return "", fmt.Errorf("no outbound matching %q", server)
+}
+
+// ChannelKeysFromConfig extracts deterministic, secret-free keys for the real
+// (non-control) outbounds in a config, in config order. These feed ChannelMemory
+// so the engine can remember per-channel health. WireGuard WARP endpoints are
+// not outbounds here; the primary VPS outbound is the one that matters most.
+func ChannelKeysFromConfig(cfg []byte) []string {
+	var raw struct {
+		Outbounds []struct {
+			Type       string `json:"type"`
+			Tag        string `json:"tag"`
+			Server     string `json:"server"`
+			ServerPort int    `json:"server_port"`
+		} `json:"outbounds"`
+	}
+	if err := json.Unmarshal(cfg, &raw); err != nil {
+		return nil
+	}
+	skip := map[string]bool{"direct": true, "block": true, "urltest": true, "selector": true, "dns": true}
+	var keys []string
+	for _, ob := range raw.Outbounds {
+		if skip[ob.Type] || ob.Server == "" {
+			continue
+		}
+		keys = append(keys, fmt.Sprintf("%s:%s:%d", ob.Type, ob.Server, ob.ServerPort))
+	}
+	return keys
+}
+
+// PrimaryChannelKeyFromConfig returns the key of the first real outbound (the
+// primary channel, e.g. the VPS entry) or "" if none.
+func PrimaryChannelKeyFromConfig(cfg []byte) string {
+	keys := ChannelKeysFromConfig(cfg)
+	if len(keys) == 0 {
+		return ""
+	}
+	return keys[0]
+}
+
 // PingServer does a TCP connect to host:port and returns latency in ms (-1 on error).
 func PingServer(host string, port int) int {
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	start := time.Now()
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {

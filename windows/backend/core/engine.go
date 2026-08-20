@@ -8,8 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,8 +15,8 @@ import (
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common/json"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/json"
 )
 
 // EngineState describes the lifecycle state of the embedded sing-box instance.
@@ -155,7 +153,7 @@ func (w platformLogWriter) WriteMessage(level log.Level, message string) {
 // Start parses configJSON and launches a new sing-box instance in this process.
 // If an instance is already running, Start returns ErrAlreadyRunning — use
 // Reload() to swap configs. Start blocks until Start() on box.Box returns.
-func (e *Engine) Start(configJSON []byte) (errRet error) {
+func (e *Engine) Start(configJSON []byte) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -164,27 +162,29 @@ func (e *Engine) Start(configJSON []byte) (errRet error) {
 		return ErrAlreadyRunning
 	}
 
+	e.setState(StateStarting)
+	e.done = make(chan struct{})
+	return e.startLocked(configJSON)
+}
+
+// startLocked is the single shared launch path for both Start and Reload.
+// The caller MUST hold e.mu. It handles panic recovery, config decode, box.New
+// and a 15s start timeout — so a broken config can never leave the engine stuck
+// in "Starting" (it always ends in Running or Error).
+func (e *Engine) startLocked(configJSON []byte) (errRet error) {
+	var instance *box.Box
+
 	// Catch panics from sing-box config decode/New/Start — sing-box panics on
 	// malformed configs. Without this, state would be stuck in Starting forever.
 	defer func() {
 		if r := recover(); r != nil {
+			if instance != nil {
+				_ = closeBoxWithTimeout(instance, 5*time.Second)
+			}
 			e.failLocked(fmt.Errorf("sing-box panic: %v", r))
 			errRet = fmt.Errorf("sing-box panic: %v", r)
 		}
 	}()
-
-	e.setState(StateStarting)
-	e.done = make(chan struct{})
-
-	// CRITICAL: Remove stale cache.db before sing-box tries to open it.
-	// sing-box-lx on Windows hangs on cache-file initialization ("initialize
-	// cache-file: timeout") if the file is corrupted or locked by AV.
-	if exePath, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exePath)
-		for _, f := range []string{"cache.db", "cache.db-journal"} {
-			os.Remove(filepath.Join(exeDir, f))
-		}
-	}
 
 	// 1. Parse the JSON config into option.Options using sing-box's extended
 	//    decoder, which understands config selectors and merge semantics.
@@ -200,7 +200,7 @@ func (e *Engine) Start(configJSON []byte) (errRet error) {
 
 	// 2. Build a cancellable context with timeout to prevent hangs.
 	ctx, cancel := context.WithCancel(registryCtx)
-	instance, err := box.New(box.Options{
+	instance, err = box.New(box.Options{
 		Context:           ctx,
 		Options:           options,
 		PlatformLogWriter: e.platformWriter(),
@@ -211,30 +211,83 @@ func (e *Engine) Start(configJSON []byte) (errRet error) {
 		return err
 	}
 
-	// 3. Start with timeout — box.Box.Start() can hang on cache-file init.
-	// Run in goroutine, wait max 15 seconds.
+	// 3. Start with a bounded timeout. If Start fails or times out, cancel the
+	// instance and give Close a bounded chance to release partially-created
+	// resources before publishing StateError.
 	startDone := make(chan error, 1)
 	go func() {
-		startDone <- instance.Start()
+		startDone <- startBox(instance)
 	}()
+	startTimer := time.NewTimer(15 * time.Second)
+	defer startTimer.Stop()
+
 	select {
 	case err := <-startDone:
 		if err != nil {
 			cancel()
-			e.failLocked(fmt.Errorf("start sing-box: %w", E.Cause(err)))
-			return err
+			_ = closeBoxWithTimeout(instance, 5*time.Second)
+			wrapped := fmt.Errorf("start sing-box: %w", E.Cause(err))
+			e.failLocked(wrapped)
+			return wrapped
 		}
-	case <-time.After(15 * time.Second):
+	case <-startTimer.C:
 		cancel()
-		e.failLocked(fmt.Errorf("start sing-box: timeout (15s) — cache.db hang"))
-		return fmt.Errorf("sing-box start timeout")
+		cleanupErr := closeBoxWithTimeout(instance, 5*time.Second)
+		wrapped := fmt.Errorf("sing-box start timeout (15s)")
+		if cleanupErr != nil {
+			wrapped = fmt.Errorf("%w; cleanup: %v", wrapped, cleanupErr)
+		}
+		e.failLocked(wrapped)
+		return wrapped
 	}
 
 	e.currentBox = instance
 	e.currentCtx = ctx
 	e.currentCancel = cancel
 	e.setState(StateRunning)
+	e.closeDoneLocked()
 	return nil
+}
+
+// startBox converts a panic in the Start goroutine into an ordinary error so
+// the parent lifecycle can publish StateError instead of crashing the process.
+func startBox(instance *box.Box) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sing-box start panic: %v", r)
+		}
+	}()
+	return instance.Start()
+}
+
+func closeBox(instance *box.Box) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sing-box close panic: %v", r)
+		}
+	}()
+	return instance.Close()
+}
+
+// closeBoxWithTimeout prevents a failed or replaced instance from blocking the
+// lifecycle forever. The timeout is a final safety boundary for a library call
+// that may be stuck in platform/network cleanup.
+func closeBoxWithTimeout(instance *box.Box, timeout time.Duration) error {
+	if instance == nil {
+		return nil
+	}
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- closeBox(instance)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-closeDone:
+		return err
+	case <-timer.C:
+		return fmt.Errorf("sing-box close timeout (%s)", timeout)
+	}
 }
 
 // Close gracefully shuts the running instance down. It is safe to call when
@@ -262,7 +315,7 @@ func (e *Engine) Close() error {
 
 	var err error
 	if boxInstance != nil {
-		err = boxInstance.Close()
+		err = closeBoxWithTimeout(boxInstance, 5*time.Second)
 	}
 
 	e.currentBox = nil
@@ -281,66 +334,39 @@ func (e *Engine) Close() error {
 }
 
 // Reload atomically swaps the running config for a new one. Because sing-box
-// has no in-process hot-reload, this is implemented as Close() + Start(); the
-// mutex guarantees callers never observe an in-between (Stopped) state from
-// outside. On failure the engine ends up Stopped and the error is returned;
-// callers should treat that as "VPN is down" and retry with a fallback config.
+// has no in-process hot-reload, this is implemented as teardown + Start via the
+// shared startLocked path; the mutex guarantees callers never observe an
+// in-between (Stopped) state from outside. On failure the engine ends up in
+// Error and the error is returned; callers should treat that as "VPN is down"
+// and retry with a fallback config.
 func (e *Engine) Reload(configJSON []byte) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Tear down whatever is running (if anything).
+	if e.State() == StateStopping {
+		return ErrAlreadyStopping
+	}
+
+	// Tear down whatever is running (if anything). Close is bounded so a broken
+	// old instance cannot prevent the new config from reaching a terminal state.
 	if e.State() == StateRunning || e.State() == StateStarting {
 		e.setState(StateStopping)
 		if e.currentCancel != nil {
 			e.currentCancel()
 		}
 		if e.currentBox != nil {
-			_ = e.currentBox.Close()
+			_ = closeBoxWithTimeout(e.currentBox, 5*time.Second)
 		}
 		e.currentBox = nil
 		e.currentCancel = nil
 		e.currentCtx = nil
 	}
-	e.setState(StateStopped)
-	e.done = nil
 
-	// Re-run the Start path inline. We duplicate the body instead of calling
-	// Start() so that the whole swap stays under one mutex acquisition and the
-	// state never reports Stopped to a concurrent observer.
+	// Wake waiters attached to the previous attempt before replacing the channel.
+	e.closeDoneLocked()
 	e.setState(StateStarting)
 	e.done = make(chan struct{})
-
-	registryCtx := boxContext(context.Background())
-	options, err := json.UnmarshalExtendedContext[option.Options](registryCtx, configJSON)
-	if err != nil {
-		e.failLocked(fmt.Errorf("decode config: %w", E.Cause(err)))
-		return err
-	}
-
-	ctx, cancel := context.WithCancel(registryCtx)
-	instance, err := box.New(box.Options{
-		Context:           ctx,
-		Options:           options,
-		PlatformLogWriter: e.platformWriter(),
-	})
-	if err != nil {
-		cancel()
-		e.failLocked(fmt.Errorf("create sing-box: %w", E.Cause(err)))
-		return err
-	}
-
-	if err := instance.Start(); err != nil {
-		cancel()
-		e.failLocked(fmt.Errorf("start sing-box: %w", E.Cause(err)))
-		return err
-	}
-
-	e.currentBox = instance
-	e.currentCtx = ctx
-	e.currentCancel = cancel
-	e.setState(StateRunning)
-	return nil
+	return e.startLocked(configJSON)
 }
 
 // Wait blocks until the current Start/Reload has reached a terminal state
@@ -356,10 +382,9 @@ func (e *Engine) Wait() error {
 	return nil
 }
 
-// failLocked transitions the engine to StateError and closes the done channel.
+// closeDoneLocked wakes callers waiting for the current lifecycle attempt.
 // Caller must hold e.mu.
-func (e *Engine) failLocked(err error) {
-	e.setState(StateError)
+func (e *Engine) closeDoneLocked() {
 	if e.done != nil {
 		select {
 		case <-e.done:
@@ -367,6 +392,13 @@ func (e *Engine) failLocked(err error) {
 			close(e.done)
 		}
 	}
+}
+
+// failLocked transitions the engine to StateError and closes the done channel.
+// Caller must hold e.mu.
+func (e *Engine) failLocked(err error) {
+	e.setState(StateError)
+	e.closeDoneLocked()
 }
 
 // setState atomically stores the lifecycle state.

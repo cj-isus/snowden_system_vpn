@@ -1,661 +1,729 @@
-# План изменений snowden.system v2 — развёрнутая версия
+# План snowden.system v2 — проверенная реализация адаптивной системы
 
-> Дорожная карта «что / как / почему». Ссылки `файл:строка` проверены по реальному
-> коду. Делится на три части:
-> - **A. Правильность ядра** — чиним то, что сломано внутри (база, без неё строить дальше нельзя).
-> - **B. Адаптивность по теории** — закрываем архитектурные пробелы (`ОБХОД_АДАПТИВНАЯ_ТЕОРИЯ.md`).
-> - **C. Порядок, контрольные точки, что НЕ делать, риски**.
+> Версия плана: 2026-08-20.
 >
-> Для каждого пункта: **причина → текущее состояние (код) → почему это проблема →
-> решение (дизайн + код-эскиз) → граничные случаи → тесты → критерий приёмки.**
-
-Ориентиры из теории, применяемые ниже:
-- Адаптивность = петля «**детекти → выбери → примени → проверь → запомни**». Сейчас есть все звенья, кроме **«запомни»** — главный архитектурный пробел.
-- «Один конфиг ≠ одна страна/канал»: «не работает» часто = конкретный эндпоинт/узел (DME, torn-down), а не протокол. Нужен **транспортный пул**.
-- ТСПУ судит о соединении **по первому пакету** → ротация I1 (AmneziaWG) — дешёвый рычаг, который у нас не задействован.
-
----
-
-# ЧАСТЬ A. Правильность ядра
-
-## A1. Circuit breaker не подключен (мёртвые ShouldProbe / EnterHalfOpen)
-
-### Причина
-Машина состояний `Closed → Open → HalfOpen → Closed` спроектирована, но работает лишь частично: вспомогательные методы никогда не вызываются, поэтому cooldown/backoff не влияют на поведение.
-
-### Текущее состояние (код)
-- `circuitBreaker` (`adaptive.go:33-55`): `failThreshold=3`, `halfOpenProbes=2`, `cooldownStart=10s`, `cooldownMax=60s`, `currentCooldown=10s`.
-- `ShouldProbe()` (`adaptive.go:99`) и `EnterHalfOpen()` (`adaptive.go:109`) — только определения, **grep по проекту даёт только их объявления**.
-- `transition()` (`adaptive.go:137-154`): удваивает `currentCooldown` на каждый Open, сбрасывает на Closed — **но никто его не читает**.
-- `loop()` (`adaptive.go:240-298`): фиксированный `ticker` 30 с → `deepProbe` → при ошибке `RecordFailure`; при успехе `onProbeSuccess`.
-- Как следствие, восстановление идёт «самотёком»: на 30-с тике `deepProbe` успешен → `RecordSuccess` (`adaptive.go:58`) → в Open переходит в HalfOpen с `consecutiveOK=1` → второй успех → Closed. Задуманный путь Open→(cooldown)→HalfOpen не используется.
-
-### Почему это проблема
-1. Cooldown не выполняет роль «дать мёртвому каналу отдохнуть»: после Open система тут же начнёт долбить его каждые 30 c.
-2. Интервал зондирования **не адаптируется к состоянию**: в HalfOpen нужна частая проверка, в Closed — редкая, в Open — ждать cooldown. Сейчас везде 30 c.
-3. `halfOpenProbes=2` при интервале 30 c означает до минуты на восстановление после первого успеха противоречит заявленному UX.
-
-### Решение (дизайн + код-эскиз)
-1. Добавить геттер:
-```go
-// CurrentCooldown возвращает текущий backoff (для настройки тикера).
-func (cb *circuitBreaker) CurrentCooldown() time.Duration {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	return cb.currentCooldown
-}
-```
-2. Переписать `loop()` (`adaptive.go:266-297`): управлять интервалом по состоянию.
-```go
-const (
-	healthyInterval = 30 * time.Second // Closed: редкая проверка
-	probeInterval   = 3 * time.Second  // HalfOpen: агрессивное подтверждение
-	probeTimeout    = 10 * time.Second
-)
-ticker := time.NewTicker(healthyInterval)
-defer ticker.Stop()
-
-for {
-	select {
-	case <-ae.ctx.Done():
-		return
-	case <-ticker.C:
-	}
-	if !ae.engine.Running() {
-		continue
-	}
-
-	// Интервал тикера — по состоянию circuit breaker.
-	switch ae.cb.State() {
-	case StateOpen:
-		if !ae.cb.ShouldProbe() {
-			continue // ждём истечения cooldown
-		}
-		ae.cb.EnterHalfOpen()
-		ae.emit("engine:diag", "[diag] ⏱ cooldown elapsed — HalfOpen, probing")
-		ticker.Reset(probeInterval)
-	case StateHalfOpen:
-		ticker.Reset(probeInterval) // часто, пока подтверждаем
-	default: // StateClosed
-		ticker.Reset(healthyInterval)
-	}
-
-	err := ae.deepProbe(probeTimeout)
-	if err == nil {
-		ae.onProbeSuccess()
-		continue
-	}
-
-	cat := ClassifyProbeError(err)
-	ae.emit("engine:diag", fmt.Sprintf("[diag] probe failed: %s (%s)", cat.String(), err))
-
-	if tripped := ae.cb.RecordFailure(); tripped {
-		ae.onCircuitOpen(cat)
-		ticker.Reset(ae.cb.CurrentCooldown()) // не долбим мёртвый канал
-	}
-}
-```
-3. `onCircuitOpen` (`adaptive.go:315`) не трогаем: у него уже есть reload + быстрая проверка и ветка `CatNetworkDown` без reload — это остаётся в силе.
-
-### Граничные случаи
-- **Open при единственном успехе**: `RecordSuccess` в Open переводит в HalfOpen (`adaptive.go:70-72`) — после нашего тикера это станет корректным «тестовым» пробингом, а не случайным.
-- **Cooldown растёт без верхней границы по времени Open**: `currentCooldown` упирается в `cooldownMax=60s` (`adaptive.go:146-149`) — ок; при возврате в Closed сбрасывается (`:152`).
-- **Канал реально мёртв**: на каждом Open cooldown удваивается → интервал между попытками растёт 10→20→40→60 c, не флудим.
-
-### Тесты (новые `core/adaptive_test.go`)
-- `RecordFailure` триппит Open ровно на `failThreshold`.
-- `ShouldProbe` false до истечения cooldown, true после; cooldown удваивается на каждый Open и сбрасывается на Closed.
-- `transition` Open→HalfOpen→Closed фиксирует `consecutiveOK`.
-- Интеграционный: замокать `deepProbe` (интерфейс) → убедиться, что тикер переключается на `probeInterval` в HalfOpen.
-
-### Критерий приёмки
-`go test ./backend/core/` (тесты circuitBreaker) зелёный; логи показывают `cooldown elapsed — HalfOpen, probing` и тикер 3 c в восстановлении; `currentCooldown` реально растёт/сбрасывается.
+> Этот документ заменяет прежний план и отделяет проверенные факты от проектных
+> решений. Цель — не «добавить ещё протоколов», а получить управляемую систему:
+> обнаружить проблему → выбрать рабочий канал → применить → проверить → запомнить.
+>
+> Эталонный контур реализации на первом этапе — **Windows: Go + Wails + embedded
+> sing-box-lx**. Android и iOS подключаются после стабилизации контракта канала.
 
 ---
 
-## A2. Утечка горутин в metricsLoop при каждом Reload
+## 0. Статус проверки
 
-### Причина
-`go m.metricsLoop()` запускается без управления жизненным циклом; новый цикл на каждый Reload, старые живут до остановки движка.
+### 0.1. Что проверено
 
-### Текущее состояние (код)
-- `StartVPN` (`manager.go:74`): `go m.metricsLoop()`.
-- `ReloadVPN` (`manager.go:118`): `go m.metricsLoop()`.
-- `metricsLoop` (`manager.go:79`): `for m.engine.Running() { m.metrics.sample(); m.PollConnections(); time.Sleep(time.Second) }` — без канала отмены и без `WaitGroup`.
+- Windows использует embedded `box.Box`, а не subprocess sing-box.
+- Живой путь конфигурации: `app.LoadConfigFile` → `windows/assets/configs/`.
+- `windows/backend/config/builder.go` — legacy и не участвует в рабочем пути.
+- В текущей незакоммиченной ветке уже есть попытки исправить lifecycle, circuit
+  breaker, metrics loop, outbound tag resolution и добавить `ChannelMemory`.
+- В основной рабочей конфигурации фактически нельзя автоматически считать все
+  документированные каналы существующими: runtime-конфиг и публичный `.example`
+  расходятся. Реальные каналы определяются только фактическим конфигом.
+- Основной проверенный транспорт — Hysteria2 VPS. Наличие рабочих VLESS/FR/AWG
+  каналов требует отдельного live-теста.
+- `DomainStatsRegistry.GetBest()` реализован, но не подключён к выбору маршрута.
+- Windows использует mixed inbound + системный HTTP proxy, а не полноценный TUN
+  для всего трафика.
 
-### Почему это проблема
-- Накапливаются горутины на каждой смене сервера/правила.
-- Дублируются `sample()` (искажение скорости) и `PollConnections()` (дубли записей в `domainStats`) — статистика врёт.
+### 0.2. Проверенные исправления против старых документов
 
-### Решение (design + код-эскиз)
-Вариант с одним управляемым циклом (предпочтительнее: точное число активных опросов):
-```go
-// поля Manager:
-metricsStop chan struct{}
-metricsWG   sync.WaitGroup
+1. `experimental.cache_file` sing-box хранит fake IP/DNS-кэш, но не является
+   памятью выбора `urltest`.
+2. `store_selected` относится к старому Clash API и Selector; на текущем
+   `urltest` без Clash API рассчитывать на него нельзя.
+3. В sing-box/sing-box-lx текущей ветки нет native `mieru` outbound.
+4. AWG-поля присутствуют в исходнике lx, но рабочая AWG-сборка проекта не
+   доказана: main module использует `sagernet/wireguard-go v0.0.3`, а runtime
+   совместимость с obfuscation должна быть проверена отдельно.
+5. Clash API на `127.0.0.1:9090` нельзя считать работающим: основной конфиг его
+   не включает, а текущие Wails build tags не включают `with_clash_api`.
+6. Cloudflare Worker был синтаксически невалиден при `node --check`; его нельзя
+   считать готовым production-сенсором.
+7. `go 1.25.0` валиден: Go 1.25 выпущен в августе 2025. Понижать версию из-за
+   старой документации не требуется.
 
-// в NewManager:
-metricsStop: make(chan struct{}),
+### 0.3. Состояние рабочей копии на момент создания плана
 
-// startMetrics — идемпотентно: стоп старого, ровно одна горутина.
-func (m *Manager) startMetrics() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// Останавливаем предыдущий цикл, если есть (после Reload).
-	select {
-	case <-m.metricsStop:
-		// уже закрыт/завершён
-	default:
-		close(m.metricsStop)
-	}
-	m.metricsStop = make(chan struct{})
-	stop := m.metricsStop
-	m.metricsWG.Add(1)
-	go func() {
-		defer m.metricsWG.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-time.After(time.Second):
-				if m.engine.Running() {
-					m.metrics.sample()
-					m.PollConnections()
-				}
-			}
-		}
-	}()
-}
+Ветка `master`. Уже существовали незакоммиченные изменения в:
 
-func (m *Manager) stopMetrics() {
-	m.mu.Lock()
-	if m.metricsStop != nil {
-		close(m.metricsStop)
-		m.metricsStop = nil
-	}
-	m.mu.Unlock()
-	m.metricsWG.Wait()
-}
-```
-Точки вызова:
-- `StartVPN` (`manager.go:74`) → `m.metrics.Start(); m.startMetrics()`.
-- `ReloadVPN` (`manager.go:118`) → `m.metrics.Start(); m.startMetrics()`.
-- `StopVPN` (`manager.go:88`) → `m.stopMetrics()` перед `engine.Close()`.
-
-### Граничные случаи / гонки
-- **Двойной вызов `startMetrics`**: закрытие уже закрытого канала — защищено `select/default` (см. выше); закрытие в `stopMetrics` — только под `m.mu`.
-- **Вызов `stopMetrics` при никогда не стартованных метриках**: `metricsStop==nil` → идемпотентно.
-- **Гонка `close`/`start`**: все обращения к `metricsStop` — под `m.mu`, кроме `stop` в горутине (канал читается только на `<-stop`, не закрывается там).
-
-### Тесты (новые `core/manager_test.go`)
-- N подряд `ReloadVPN` при живом движке → число активных metrics-горутин = 1.
-- `StopVPN` → `metricsWG.Wait()` завершается без зависания.
-- Одновременные `startMetrics`+`stopMetrics` под `-race` не паникуют.
-
-### Критерий приёмки
-`go test -race ./backend/core/` зелёный; при 50 `ReloadVPN` нет роста горутин (проверяется счётчиком-двойником `metricsWG`).
-
----
-
-## A3. Дублирование Start/Reload в engine.go (разный уровень защиты)
-
-### Причина
-`Reload` повторяет тело `Start`, но **без** panic-recover и **без** таймаута старта.
-
-### Текущее состояние (код)
-- `Start` (`engine.go:158-238`): проверка состояния → `StateStarting` → panic-recover (`:169-174`) → удаление `cache.db` (`:179-187`) → декод → `box.New` → старт с таймаутом 15 c (`:214-231`).
-- `Reload` (`engine.go:288-344`): teardown → `StateStarting` → декод → `box.New` → `instance.Start()` **без** panic-recover и **без** таймаута (`:333`).
-
-### Почему это проблема
-На битом конфиге `Reload` может: зависнуть на `cache.db` (инициализации) без таймаута, либо упасть в панику без перехода `StateError` → движок остаётся в «вечном `StateStarting`». Расхождение уже реально (см. код выше).
-
-### Решение (design + код-эскиз)
-Вынести общий путь в `startLocked` (вызывается только при удержанном `e.mu`):
-```go
-// startLocked — общий путь Start и Reload (caller держит e.mu).
-func (e *Engine) startLocked(configJSON []byte) (errRet error) {
-	defer func() {
-		if r := recover(); r != nil {
-			e.failLocked(fmt.Errorf("sing-box panic: %v", r))
-			errRet = fmt.Errorf("sing-box panic: %v", r)
-		}
-	}()
-	// удаление залипшего cache.db
-	if exePath, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exePath)
-		for _, f := range []string{"cache.db", "cache.db-journal"} {
-			os.Remove(filepath.Join(exeDir, f))
-		}
-	}
-	registryCtx := boxContext(context.Background())
-	options, err := json.UnmarshalExtendedContext[option.Options](registryCtx, configJSON)
-	if err != nil {
-		e.failLocked(fmt.Errorf("decode config: %w", E.Cause(err)))
-		return err
-	}
-	ctx, cancel := context.WithCancel(registryCtx)
-	instance, err := box.New(box.Options{
-		Context:           ctx,
-		Options:           options,
-		PlatformLogWriter: e.platformWriter(),
-	})
-	if err != nil {
-		cancel()
-		e.failLocked(fmt.Errorf("create sing-box: %w", E.Cause(err)))
-		return err
-	}
-	startDone := make(chan error, 1)
-	go func() { startDone <- instance.Start() }()
-	select {
-	case err := <-startDone:
-		if err != nil {
-			cancel()
-			e.failLocked(fmt.Errorf("start sing-box: %w", E.Cause(err)))
-			return err
-		}
-	case <-time.After(15 * time.Second):
-		cancel()
-		e.failLocked(fmt.Errorf("start sing-box: timeout (15s) — cache.db hang"))
-		return fmt.Errorf("sing-box start timeout")
-	}
-	e.currentBox = instance
-	e.currentCtx = ctx
-	e.currentCancel = cancel
-	e.setState(StateRunning)
-	return nil
-}
-```
-Тонкие обёртки:
-```go
-func (e *Engine) Start(configJSON []byte) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.State() != StateStopped && e.State() != StateError {
-		return ErrAlreadyRunning
-	}
-	e.setState(StateStarting)
-	e.done = make(chan struct{})
-	return e.startLocked(configJSON)
-}
-
-func (e *Engine) Reload(configJSON []byte) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.State() == StateRunning || e.State() == StateStarting {
-		e.setState(StateStopping)
-		if e.currentCancel != nil {
-			e.currentCancel()
-		}
-		if e.currentBox != nil {
-			_ = e.currentBox.Close()
-		}
-		e.currentBox = nil
-		e.currentCancel = nil
-		e.currentCtx = nil
-	}
-	e.setState(StateStarting)
-	e.done = make(chan struct{})
-	return e.startLocked(configJSON)
-}
+```text
+windows/app.go
+windows/backend/config/builder.go
+windows/backend/core/adaptive.go
+windows/backend/core/engine.go
+windows/backend/core/manager.go
+windows/backend/core/metrics.go
 ```
 
-### Граничные случаи / гонки
-- **Состояние не публикуется как `Stopped` в середине Reload**: мьютекс держится на весь своп — наблюдатель всегда видит `Running` или `Starting`.
-- **Закрытие `done`**: `failLocked` закрывает канал один раз (защищено `select/default`, `engine.go:363-368`).
-- **Двойной `StopVPN` одновременно с `Reload`**: оба берут `e.mu` — сериализуются.
+и новые файлы тестов/памяти в `windows/backend/core/`, а также `.freebuff/`.
+Эти изменения нельзя считать проверенными до запуска Go-тестов и race detector.
+План не разрешает удалять или откатывать их без отдельного анализа diff.
 
-### Тесты
-- Юнит: `Reload` с заведомо битым JSON → возвращает ошибку, `State()==StateError` (не зависание).
-- Юнит (замокать `box.New` через интерфейс или фабрику): `Reload` в панике → `StateError`.
-- `go test -race ./backend/core/`.
+### 0.4. Локальная проверка окружения после создания плана
 
-### Критерий приёмки
-`go build ./...`; `Reload` на битом конфиге не зависит и не оставляет `StateStarting`.
+Проверено пользователем на Windows:
+
+- `windows/frontend`: `npm ci` успешно установил зависимости;
+- `npm run build` успешно собрал Vue frontend и `frontend/dist`;
+- ADB-смартфон сначала был `unauthorized`, затем успешно перешёл в статус `device`;
+- Go отсутствует в PATH, поэтому Go tests/build пока не запускались;
+- Flutter отсутствует в PATH, поэтому Android build пока не запускался;
+- правильный Android-путь проекта: `D:\\snowden-v2\\android`;
+- ожидаемый AAR-путь в этом checkout: `android/android/app/libs/libbox.aar`;
+- старый `build_android.bat` содержит устаревший абсолютный путь и требует исправления.
+
+Не запускать `npm audit fix` автоматически: в отчёте есть 2 high vulnerabilities,
+но автоматическое обновление может изменить lockfile и версии toolchain. Сначала
+зафиксировать воспроизводимую сборку, затем отдельно разобрать advisory.
 
 ---
 
-## A4. Мёртвый код: injectSplitTunnel / BuildConfig / EnsureCIDRFile
+## 1. Зафиксированные архитектурные решения
 
-### Причина
-RU-CIDR-сплит выпилили из живого пути ради производительности, но функции не удалили; документация описывает несуществующий конфиг-билдер.
+### 1.1. Один владелец выбора канала
 
-### Текущее состояние (код)
-- `injectSplitTunnel` (`app.go:606-660`) — **нигде не вызывается**.
-- `config.EnsureCIDRFile` (`builder.go:104`) — вызывается только из `injectSplitTunnel` (`app.go:622`) → недостижим.
-- `config.BuildConfig` (`builder.go:27`) — вне живого пути вообще (реальный путь — `LoadConfigFile` `app.go:576`, читает шаблон).
-- `LoadConfigFile` (`app.go:600-603`): комментарий подтверждает, что CIDR (11 401 правило) убран за производительность.
+**AdaptiveController владеет политикой выбора.**
 
-### Почему это проблема
-Дрейф между документацией и кодом. `STRUCTURE.md` подаёт «конфиг-билдер» как активный компонент. Читающий думает, что есть билдер и CIDR-сплит, а их нет.
+sing-box выполняет выбранный канал через `selector`:
 
-### Решение (два варианта — выбрать по целям)
-**Вариант A (рекомендуемый сейчас):** удалить мёртвый код:
-- `injectSplitTunnel` целиком из `app.go`;
-- в `builder.go`: `BuildConfig`, `EnsureCIDRFile`, `splitCSV`, `trim` (если больше не нужны);
-- поправить `STRUCTURE.md`: конфиг-билдер → «legacy / не в живом пути»; реальный путь — `app.go`/`LoadConfigFile` + `configs/`→`assets/configs/`.
-
-**Вариант B (если CIDR вернуть осознанно):** не раскидывать 11 тыс. правил по `route.rules`, а собрать в **один rule-set** (`type: local`, как `EnsureCIDRFile`) и вернуть вызов под флагом:
-```go
-// LoadConfigFile: если config.SplitTunnelCIDR (=env/флаг true)
-raw, err = injectSplitTunnel(raw, ...) // один rule-set, не плоский список
+```text
+route.final → selector "proxy" → active outbound
+                         ↑
+                 AdaptiveController
 ```
-Поведение воспроизводимо и отключаемо.
 
-### Граничные случаи
-- Удаление `package config` целиком нельзя: `cfclient` и др. не зависят, но проверь `go vet` на неиспользуемые импорты в `builder.go` после удаления.
-- Если `EnsureCIDRFile` вдруг используется тестами `enginetest/e2e.go` — сначала перенести нужную логику.
+`urltest` не используется одновременно как второй владелец выбора в рабочем
+защищённом маршруте. Его можно оставить только для отдельной диагностики.
 
-### Тесты / проверка
-- `grep -rn "injectSplitTunnel\|BuildConfig\|EnsureCIDRFile"` по проекту → только в `STRUCTURE.md`, если оставили там упоминание.
-- `go build ./...`.
+Это устраняет конфликт:
 
-### Критерий приёмки
-Зелёная сборка; документация соответствует коду.
-
----
-
-## A5. Жёсткая завязка на имена тегов outbound
-
-### Причина
-Имена каналов захардкожены в Go, хотя конфиг — «точка истины».
-
-### Текущее состояние (код)
-`SelectServer` (`app.go:370-409`):
-```go
-case "auto": finalOutbound = "auto"
-case "nl":    finalOutbound = "grpc-nl"  // hardcoded
-case "fr":    finalOutbound = "grpc-fr"  // hardcoded
+```text
+urltest выбрал A
+ChannelMemory предпочитает B
+AdaptiveEngine reload'ит C
 ```
-и `ReloadVPN` на `manager.ReloadVPN` (`app.go:408`).
 
-### Почему это проблема
-Переименуешь тег в `template-vps-reality.json` → `SelectServer` молча направит трафик на несуществующий outbound (уйдёт «в никуда»), без ошибок до факта поломки. Система заявляет: «конфиг — источник истины» — а код её нарушает.
+### 1.2. Fail-closed по умолчанию
 
-### Решение (design + код-эскиз)
-Резолвить тег по фактическому составу `outbounds`:
-```go
-// resolveOutboundTag находит тег, чьё имя содержит код страны.
-func resolveOutboundTag(server string, cfg []byte) (string, error) {
-	if server == "auto" {
-		return "auto", nil // у нас url-test всегда tag "auto"
-	}
-	code := strings.ToLower(server)
-	var out []struct{ Tag string `json:"tag"` }
-	if err := json.Unmarshal(extractOutbounds(cfg), &out); err != nil {
-		return "", err
-	}
-	for _, o := range out {
-		if strings.Contains(strings.ToLower(o.Tag), code) {
-			return o.Tag, nil
-		}
-	}
-	return "", fmt.Errorf("no outbound matching %q", server)
-}
+```text
+явно разрешённые RU/private направления → direct
+защищённые направления → selector "proxy"
+нет рабочего канала → block
 ```
-Применение: `SelectServer` получает `finalOutbound, err := resolveOutboundTag(server, cfg)`; на ошибку — возвращать её, а не тихо `auto`.
-Дополнительно вынести карту `страна → {тег-фильтр, label}` в конфиг (например в `server-params.json`), чтобы добавление страны не требовало перекомпиляции.
 
-### Граничные случаи
-- `auto` всегда существует (url-test `tag:"auto"`). Для надёжности — ищем url-test по `type=="urltest"` при отсутствии `tag=="auto"`.
-- Неоднозначность (`nl` в `grpc-nl` и `vless-nl`): брать первый совпавший или отдавать приоритет выбранной группе (например сначала искать ровное совпадение `tag`, потом `contains`).
+`direct` не входит в защищённый fallback. Если позже понадобится fail-open,
+это должна быть отдельная видимая настройка с предупреждением об утечке.
 
-### Тесты (в `core` или `app` уровня)
-- `resolveOutboundTag("nl", cfg)` при переименованных тегах (`vless-ne` вместо `vless-nl`) всё равно находит (`vless-nl` по `contains "nl"`).
-- `resolveOutboundTag("xx", cfg)` → ошибка (а не тихий `auto`).
+### 1.3. Конфиг — источник истины
 
-### Критерий приёмки `go build ./...`; ручной тест `SelectServer("nl")` с изменённым тегом не теряет трафик.
+Go не должен зашивать `grpc-nl`, `grpc-fr`, `vless-nl` и подобные имена.
+Каналы строятся из фактического состава конфигурации и описываются через:
 
----
-
-## A6. Медленное детектирование обрыва (3 × 30 c)
-
-### Причина
-`failThreshold=3` × `checkInterval=30s` → до 90+ c на срабатывание. `onCircuitOpen` при этом синхронно в горутине цикла делает reload (до 15 c) + sleep + профайл.
-
-### Текущее состояние (код)
-- `loop()` (`adaptive.go:259-260`): `checkInterval = 30 * time.Second`, `probeTimeout = 10 * time.Second`.
-- `onCircuitOpen` (`adaptive.go:315-350`): вызывается **внутри** `loop()`; `engine.Reload` + `time.Sleep(2s)` + `deepProbe(8s)`.
-
-### Почему это проблема
-Реальный обрыв ловится за минуту-полторы — против заявленного «нажал кнопку — работает». Пока `onCircuitOpen` работает, тикер не тикает → мониторинг встаёт. Одиночный блип (потеря пакета) при этом не должен ронять туннель.
-
-### Решение (design + код-эскиз)
-Двухфазная детекция в `loop()` (в комбинации с A1):
-```go
-const (
-	failConfirmInterval = 3 * time.Second
-	failConfirmNeeded   = 3 // быстрых неудач подряд = реальный обрыв
-)
-var failsInARow int
-
-// в ветке неудачи:
-if err != nil {
-	cat := ClassifyProbeError(err)
-	failsInARow++
-	ae.emit("engine:diag", fmt.Sprintf("[diag] probe failed: %s (%s)", cat.String(), err))
-	if failsInARow >= failConfirmNeeded {
-		failsInARow = 0
-		if tripped := ae.cb.RecordFailure(); tripped {
-			ae.onCircuitOpen(cat)
-			ticker.Reset(ae.cb.CurrentCooldown())
-			continue
-		}
-	}
-	ticker.Reset(failConfirmInterval) // быстро перепроверяем
-	continue
-}
-// успех:
-failsInARow = 0
-ae.onProbeSuccess()
+```text
+ChannelDescriptor:
+  id
+  tag
+  protocol
+  server
+  port
+  country
+  profile
+  enabled
+  priority
 ```
-Пересмотр `failThreshold`: при подтверждениях каждые 3 c порог можно снизить до 2-3; итого срабатывание ~6-9 c вместо 90 c. Для `CatNetworkDown` по-прежнему не релоадим, только ждём.
 
-### Граничные случаи / замечания
-- **Обрыв посреди `onCircuitOpen`**: он синхронный. Опционально вынести reload+профайл на отдельную горутину, чтобы тикер продолжал работать; но сначала — просто A1+A6 вместе дают корректный тикер (решать после замеров).
-- **`failsInARow` между состояниями**: сбрасываем на Open и на успех; между двумя HalfOpen-сессиями не накапливаем.
-- **Живой, но медленный канал** (`CatDegraded`): сейчас `deepProbe` возвращает только err/nil; чтобы отличать «медленно» от «упало», нужен тайминг — см. B8.
+Если в текущем конфиге есть только Hysteria2 NL, UI должен показывать только
+доступные `Auto/NL`. Нельзя показывать FR и направлять его в несуществующий tag.
 
-### Тесты
-- Замокать `deepProbe`: 3 подряд фейла за 6-9 c → `onCircuitOpen`; один фейл + успех → туннель жив, `failsInARow` сброшен.
-- Лог-прогон имитации обрыва: срабатывание < 10 c.
+### 1.4. Локальная память — собственная
 
-### Критерий приёмки
-Имитация обрыва ловится < 10 c; одиночная потеря пакета не роняет туннель.
+`ChannelMemory` хранит историю каналов и влияет на следующий выбор. На
+`cache_file` sing-box как на память выбора полагаться нельзя.
 
----
+Ключ памяти не содержит private key, password, UUID или Telegram token:
 
-# ЧАСТЬ B. Адаптивность по теории
-
-> Делать строго после Части A: на нестабильной базе (A2, A3) строить «память» и
-> ротацию опасно.
-
-## B1. Независимый слой выхода: WARP в основной конфиг
-
-### Причина
-У основного пути один источник выхода — VPS. По теории, барьер «IP/ASN» снимается только сменой точки выхода; нужен независимый канал.
-
-### Текущее состояние (код)
-- `template-vps-reality.json`: urltest `auto` содержит **только VPS-каналы** (`grpc-nl`, `grpc-fr`, `httpupgrade-nl/fr`, `vless-nl/fr`, `hysteria2-nl`) + `direct`/`block`.
-- WARP живёт отдельным шаблоном `template-warp-awg.json` (один эндпоинт `162.159.192.1:4500`).
-
-### Почему это проблема
-Когда все VPS-каналы лежат (VPS упал / IP зарезали), «адаптивному» переключаться не на что — VPN падает, хотя WARP (бесплатный, независимый) доступен.
-
-### Решение (design)
-Добавить WARP в urltest-группу `auto` как **независимый резерв**: `[VPS…, warp-awg, direct]`. Порядок в `outbounds` задаёт приоритет; WARP — после VPS, перед `direct` (fallback-цепочка «VPS → WARP → direct», по образцу clash-warp-config).
-Источник WARP-параметров — `template-warp-awg.json`: вынести его `endpoints.wireguard` и соответствующий outbound в основной конфиг (или генерировать `config`-ом). Ключевое — `config/sync-to-windows.sh` должен разносить и основной, и WARP-блок, чтобы `assets/configs/` никогда не расходился с источником.
-
-### Тесты / проверка
-- `go build ./...`.
-- Ручной прогон: отключить VPS-каналы → трафик идёт через WARP, VPN не падает.
-- Проверка `sync-to-windows.sh` распространяет оба конфига.
-
-### Риск и критерий
-WARP-эндпоинты нестабильны и бывают заблокированы (см. B3) — поэтому WARP **резерв, не главный канал**. Приёмка: VPS-канал жив, WARP в пуле ниже по приоритету.
-
----
-
-## B2. «Память» — пропущенное звено адаптивной петли
-
-### Причина
-Петля «детекти → выбери → примени → проверь → запомни» не имеет «запомни». Теория: память двигает политику.
-
-### Текущее состояние (код)
-- `ErrorClassifier` (`classifier.go:82-88`): `current`, `lastError`, события `maxEvents` — **только диагностика, не выбор**.
-- `AdaptiveEngine` решает исключительно через `circuitBreaker` + urltest sing-box; выбора «какой канал поднять» по истории нет.
-- `Diagnostics()` (`adaptive.go:401`) отдаёт только текущие счётчики в UI.
-
-### Почему это проблема
-После каждого обрыва и восстановления система «забывает», что конкретный канал/эндпоинт/I1 в этом контексте падал. Повторный обрыв проверяется с нуля. Нет предпочтения «стратегии, которая реже падала» (byedpi `--auto-mode`), нет `store-selected`-персиста.
-
-### Решение (design + код-эскиз)
-Новая структура рядом с `classifier`:
-```go
-// ChannelRecord — история одной точки (протокол/эндпоинт/I1).
-type ChannelRecord struct {
-	Key       string    `json:"key"`       // "warp-awg:i1=sip:162.159.192.1:4500"
-	OK        int       `json:"ok"`        // успешных проверок подряд
-	Fail      int       `json:"fail"`      // фейлов подряд
-	LastOK    time.Time `json:"lastOk"`
-	LastFail  time.Time `json:"lastFail"`
-}
-
-// ChannelMemory — кеш «что работало» (bandit-score по этой цели).
-type ChannelMemory struct {
-	mu   sync.Mutex
-	recs map[string]*ChannelRecord
-	path string // для персиста на диск
-}
-
-func (m *ChannelMemory) Record(key string, ok bool)
-func (m *ChannelMemory) Score(key string) float64 // предпочтение при выборе
-func (m *ChannelMemory) Load() / Save()
+```text
+channel-id + profile-id + endpoint-hash
 ```
-Интеграция:
-- `AdaptiveEngine` получает `*ChannelMemory` (или `memory` в `NewAdaptiveEngine`).
-- `onProbeSuccess` / `RecordSuccess` → `memory.Record(currentKey, true)`; фейл → `Record(..., false)`.
-- Выбор канала для reload/ротации использует `Score`: на равных — предпочитать меньше фейлов.
-- Персист: файл рядом с exe (например `channel-memory.json`), `Save()` по изменению + на `Stop()`; `Load()` при старте. Не хранить в памяти только.
 
-### Граничные случаи / безопасность
-- **Ключ** обязан быть детерминированным и не содержать секретов (не класть `private_key`).
-- **Рост `recs`**: cap (`maxKeys`, LRU), т.к. ключей много (протокол×I1×эндпоинт).
-- **Стирание**: если эндпоинт исчез из конфига — чистить его ключи, чтобы не «судить о том, чего нет».
-- **Персист не должен биться при параллельных записях**: все мутации под `m.mu`; `Save()` — асинхронно/по таймеру.
+### 1.5. Cloudflare — дополнительный сенсор, не источник истины
 
-### Тесты
-- `Record`/`Score`: после 3 фейлов `A` и 3 OK `B` → `Score(B) > Score(A)`.
-- Персист `Save`/`Load` из временного файла.
-- Размер `recs` не превышает cap при переполнении.
+Local probe и фактический traffic path имеют приоритет. Cloudflare health может
+подсказать, что VPS доступен извне, но не доказывает доступность из сети
+пользователя и не должен сам по себе запускать reload.
 
-### Критерий приёмки
-После восстановления выбор учитывает прошлое: канал, падавший N раз подряд, не выбирается первым; выбор персистится между рестартами и виден в `Diagnostics()` (добавить `bestChannel`/`memory summary`).
+### 1.6. Мобильные клиенты — после Windows
+
+Сначала стабилизируется модель канала, состояния, fail-closed и память на
+Windows. После этого Android/iOS получают общий формат конфигурации.
 
 ---
 
-## B3. Ротация I1 (AmneziaWG) + детекция здоровья WARP-эндпоинтов
+## 2. Целевая архитектура
 
-### Причина
-По теории, «DPI судит о соединении по первому пакету» → ротация I1 (первый пакет хендшейка AWG) — первый рычаг адаптации; junk-параметры — последние. У нас один набор прокси `jc/jmin/jmax/s1-4/h1-4` и заглушка `i1`.
-
-### Текущее состояние (код)
-- `template-warp-awg.json`: один `wireguard` endpoint `tag:"warp-awg"`, `i1: YOUR_AMNEZIA_I1_HEX_BLOB` (генерится вручную), `jc:4, jmin:40, jmax:70, s1..s4:0, h1..h4:1..4`.
-- `registry.go` регистрирует wireguard-эндпоинт; тег сборки `with_awg` включает AmneziaWG 2.0.
-
-### Почему это проблема
-Нет вариантов I1 для ротации: если DPI режет конкретный I1, менять не на что кроме ручной правки. Endpoint на `162.159.192.1:4500` один — негде обойти заблокированный узел/гео.
-
-### Решение (design)
-1. **Сгенерировать набор I1**: готовые блобы (DNS/QUIC/SIP/STUN/random) — локально утилитой-генератором (warpscout `-gen-i1` даёт формат; у нас свой генератор по алгоритму AWG). Никаких секретов в коде — только `i1`-блоб и параметры.
-2. **Несколько WARP-членов в `auto`** с разными `i1` (+/или страны эндпоинтов `162.159.192.1:4500`, `nl...:4500`, ...).
-3. **Политика ротации** (связать с B2): при фейле канала с I1-A перейти на I1-B, потом I1-C; junk-параметры (`jc/jmin/jmax/s1-4/h1-4`) трогать последними.
-4. **Детект torn-down/DME** (сенсорная часть):
-   - torn-down: вместо одиночного запроса — серия (напр. 10) и смотреть **хвост потерянных пакетов**, а не общий процент; эндпоинт, режущийся на середине, не попадает в `auto`.
-   - DME/geo: при неудаче на WARP — пробовать **другой эндпоинт/страну**, а не всю группу помечать мёртвой.
-
-### Тесты / проверка
-- Генератор I1 выдаёт валидные, разные блобы (детерминированно при одном seed).
-- Конфиг с 3 WARP-членами, разными `i1`; `go build ./...`.
-- Мок детектора: эндпоинт с «режущейся серединой сессии» отсеивается; живой остаётся.
-
-### Риски / критерий
-I1-блоб чувствителен к версии AWG — генерить под ту же, что в `with_awg`. Приёмка: ротация I1 реально переключает канал без ручной правки; DME/torn-down не ломают здоровый пул.
-
----
-
-## B4. Подключить mieru как запасной no-TLS протокол
-
-### Причина
-Теория: mieru — не-TLS, XChaCha20-Poly1305, ключ от времени, padding/защита от replay, `traffic-pattern` (фрагментация TCP/nonce/low-entropy) — «трудно классифицировать и трудно зондировать». Идеальный запасной критичный канал, когда TLS-обёртки режутся.
-
-### Текущее состояние (код)
-- `configs/singbox/mieru-credentials.json` и `mieru-fr-credentials.json` **есть** (сервер/порт/логин/пароль).
-- `app.go` `OpenExternalApp("karing")` (`app.go:530-542`) — клиент Mieru.
-- В `registry.go` **нет** mieru-аутбаунда; ни один конфиг mieru не использует.
-
-### Почему это проблема
-Проект явно метил в mieru (креды + внешний клиент), но канал не интегрирован: нет ни outbound, ни маршрута, ни UI-выбора. Потенциальный резерв на случай, когда VLESS/Reality режутся, недоступен.
-
-### Решение (по шагам, с проверкой на реальном sing-box-lx v1.14.0)
-1. **Проверить поддержку**: есть ли mieru outbound в этой версии. Если sing-box-lx умеет — добавить `mieru.RegisterOutbound` в `registry.go` `outbounds()`, и mieru-аутбаунд в пул.
-2. **Если sing-box-lx НЕ умеет** mieru нативно — вариант B: mieru как **отдельный процесс/клиент** (`karing` или `mihomo`), а наш движок пробрасывает трафик через `socks`/`mixed`-инбаунд в него, или поднимаем параллельный туннель. Решение зафиксировать в коде/конфиге (не «на словах»).
-3. Добавить канал в транспортный пул (B1) как **последнюю линию** (после VPS и WARP).
-4. Выйти в UI: `SelectServer`/модуль выбора — понимать `mieru` страну (по `mieru-fr`).
-
-### Граничные случаи / безопасность
-- **Секреты**: `mieru-credentials.json` содержит пароль. Сейчас репо untracked — ок; при коммите исключить в `.gitignore` (как `server-params.json`, `warp-keys.json`, `.env`).
-- **Синхронизация часов** (ключ mieru зависит от времени сервера) — на десктопе системные часы, убедиться в NTP.
-- **Ошибка запуска параллельного клиента**: не должен скрывать основной туннель; `OpenExternalApp` возвращает ошибку (уже есть) — пробрасывать в UI.
-
-### Тесты / критерий
-- Поднятие канала `pc → mieru-server` и проброс трафика; фиксация способа запуска.
-- `go build ./...`; UI корректно отображает mieru-страну.
-- Принято, когда есть рабочий mieru-канал в пуле как последний резерв, а секреты не в VCS.
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│ Vue/Wails UI                                                     │
+│ Start / Stop / Select / Diagnostics / Logs                       │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │
+┌──────────────────────────────▼───────────────────────────────────┐
+│ Manager / LifecycleCoordinator                                   │
+│ единая сериализация Start, Stop, Reload, ApplyChannel            │
+└──────────────┬────────────────┬────────────────┬─────────────────┘
+               │                │                │
+               ▼                ▼                ▼
+        Embedded Engine   AdaptiveController   Metrics/Memory
+        box.Box           probes + CB           достоверные samples
+               │                │
+               ▼                │
+        sing-box selector ◄─────┘
+               │
+               ├─ Hysteria2 VPS
+               ├─ второй проверенный VPS/протокол
+               ├─ WARP/AWG или MASQUE после live validation
+               ├─ внешний mieru через localhost SOCKS (позже)
+               └─ block при отсутствии protected channel
+```
 
 ---
 
-# ЧАСТЬ C. Порядок, контрольные точки, что НЕ делать, риски
+# Фаза 0. Безопасность и конфигурация — P0
 
-## Порядок внедрения (зависимости)
+## 0.1. Секреты
 
-| № | Пункт | Зависит от | Приоритет |
-|---|-------|-----------|-----------|
-| 1 | A2 (горайтины) | — | Высокий (база) |
-| 2 | A3 (Start/Reload) | — | Высокий (база) |
-| 3 | A6 (быстрая детекция) + A1 (CB) | — | Высокий (вместе) |
-| 4 | A5 (теги) | — | Средний, **до** B1 (иначе новые каналы усилят хрупкость) |
-| 5 | A4 (мёртвый код) | — | Средний |
-| 6 | B1 (WARP в urltest) | A5 | Средний |
-| 7 | B3 (детекция эндпоинтов) | B1 | Средний |
-| 8 | B3 (ротация I1) | B1, B2 | Средний |
-| 9 | B2 (память) | A1-A6 | Средний (венчает адаптивность) |
-| 10 | B4 (mieru) | — | Низкий, можно параллельно |
+- Перевыпустить Telegram token, если он когда-либо был опубликован.
+- Проверить UUID, Hysteria2/mieru passwords, WARP private keys и Cloudflare IDs.
+- Не отдавать private credentials через публичный `/api/config`.
+- Не коммитить реальные configs; для release использовать защищённый provisioning.
+- Добавить secret scanning в CI.
+- Не считать `.gitignore` защитой уже утёкшего секрета.
 
-## Контрольные точки на каждом шаге
-- `cd windows/frontend && npm run build` — если тронут фронт.
-- `cd windows && go build ./...` — обязательно (требует `frontend/dist`, сначала бандл).
-- `cd windows && go test -race ./backend/core/` — после каждого пункта Части A.
-- Полная проверка Wails: `wails build -skipbindings -s -tags "with_awg,with_wireguard,with_utls,with_gvisor"`.
-- Конфиги править в `configs/singbox/` (источник истины) → `bash configs/sync-to-windows.sh`.
-- **Секреты не коммитить**: `mieru-credentials*.json`, `server-params.json`, `warp-keys.json`, `.env` → в `.gitignore`.
+## 0.2. Config validator
 
-## Что осознанно НЕ делаем (по теории — не наша цель сейчас)
-- **wdtt / VK-медиарелеи** — заточено под один сервис (VK); наша цель — общий обход.
-- **zapret/byedpi (клиентский DPI-байпас без туннеля)** — тащит внешний драйвер (WinDivert) и новый слой; только как «последний ярус» при полностью упавшем туннеле, позже.
-- **warp-relay (свой релей DNAT→Cloudflare)** — новая инфраструктура ради WARP-резерва; у нас уже есть VPS как основной выход. Опционально, позже.
-- **zieng2/wl (подписки белых списков)** — внешняя подписка; в нашу архитектуру «свои конфиги» не вписывается.
+Добавить проверку перед embedded `box.New` и в CI:
 
-## Риски и оговорки
-- **Переделка `loop()` (A1+A6)** — самая чувствительная часть (порядок состояний, тикеры). Делать пошагово, с юнит-тестами на `circuitBreaker` до/после.
-- **WARP как резерв нестабилен** (B3): не делать главным каналом, только fallback.
-- **I1-блоб чувствителен к версии AWG**: генерить под ту же, что в `with_awg`.
-- **B4 зависит от версии sing-box-lx**: сначала проверить нативную поддержку mieru, иначе менять подход (внешний клиент). Это влияет на объём: нативный = меньше кода, внешний = новая интеграция.
-- **A4 (удаление `config`-пакета)** — проверить, не используется ли `builder.go` тестами `enginetest`, до удаления.
+- JSON syntax;
+- все `route`, `detour`, `selector`, `urltest` и DNS-ссылки существуют;
+- нет `YOUR_*` в release-конфиге;
+- есть `route.final`;
+- защищённые направления не имеют скрытого direct fallback;
+- build tags соответствуют используемым протоколам;
+- секреты не попадают в diagnostics/logs;
+- конфиг можно проверить на точном sing-box-lx build.
 
-## Сводный критерий «система стала адаптивной»
-1. Обрыв ловится < 10 c и не сваливает от одиночного блипа (A6).
-2. Состояния circuit breaker реально проходят Open→cooldown→HalfOpen→Closed (A1).
-3. Нет утечки горутин и рассинхрона Start/Reload (A2, A3).
-4. Есть независимый выход (WARP) и детект его здоровья (B1, B3).
-5. Система запоминает и учитывает прошлое при выборе канала (B2) — «память» замкнула петлю.
-6. Запасной no-TLS канал (mieru) доступен пользователю (B4).
+Отдельно исправить `template-warp-awg.json`: DNS использует `detour: "proxy"`,
+но outbound с tag `proxy` отсутствует.
+
+## 0.3. Config provisioning
+
+Оставить поток:
+
+```text
+configs/singbox/
+  → configs/sync-to-windows.sh
+  → windows/assets/configs/
+```
+
+Но release должен явно проверять наличие реального runtime-конфига. Чистый
+checkout не должен считаться рабочим без безопасного provisioning.
+
+## 0.4. Документация
+
+После исправлений обновить:
+
+- корневой `STRUCTURE.md` — embedded вместо subprocess;
+- `configs/singbox/STRUCTURE.md` — фактический состав каналов;
+- `configs/templates/README.md` — не обещать VLESS, если runtime использует HY2;
+- Windows documentation — не обещать Clash API/AWG/Gecko без live-приёмки.
+
+### Приёмка Фазы 0
+
+```text
+node --check configs/cloudflare/worker.js
+конфиг без placeholder проходит validator
+публичный API не выдаёт private credentials
+sing-box check/embedded validation проходит на release-конфиге
+```
+
+---
+
+# Фаза 1. Lifecycle embedded engine — P0
+
+## 1.1. Engine
+
+Закончить единый `startLocked()`:
+
+- общий путь Start и Reload;
+- panic recovery;
+- гарантированный `StateError`;
+- bounded start timeout;
+- корректное закрытие экземпляра после timeout;
+- `Wait()` завершается после `Running` и после `Error`;
+- Reload не публикует промежуточный `Stopped`;
+- не удалять `cache.db` безусловно на каждом старте;
+- не оставлять бесконтрольную goroutine с `instance.Start()`.
+
+Тесты:
+
+- битый JSON;
+- panic из фабрики/старта;
+- timeout;
+- успешный Start + Wait;
+- Reload после Error;
+- Close во время Reload.
+
+## 1.2. Manager metrics worker
+
+Использовать один управляемый worker на весь жизненный цикл Manager:
+
+```text
+Manager.Start → start worker один раз
+Manager.Reload → обновить snapshot/счётчики
+Manager.Stop → cancel + WaitGroup.Wait
+```
+
+Не запускать новый worker при каждом Reload. Проверить `WaitGroup` под
+параллельными Start/Reload/Stop.
+
+## 1.3. Единый lifecycle API
+
+AdaptiveController не вызывает `Engine.Reload()` напрямую. Он вызывает Manager:
+
+```text
+ApplyChannel(channelID)
+ReloadConfig(snapshot)
+ReportHealth(result)
+```
+
+Все вызовы из UI, Telegram и adaptive loop проходят через один сериализованный
+контур.
+
+## 1.4. Shutdown и proxy
+
+При shutdown:
+
+```text
+Adaptive.Stop()
+Manager.StopVPN()
+Engine.Close()
+clearSystemProxy()
+```
+
+При ошибке Start системный proxy не должен оставаться включённым.
+
+### Приёмка Фазы 1
+
+```bash
+cd windows
+go test -race ./backend/core/...
+go vet ./...
+go build -tags "with_awg,with_wireguard,with_utls,with_gvisor" ./...
+```
+
+Результат: нет зависшего `Starting`, нет утечки metrics goroutines, нет race.
+
+---
+
+# Фаза 2. Controller, selector и безопасная маршрутизация — P0
+
+## 2.1. ChannelDescriptor и capabilities
+
+Добавить получение списка каналов из фактического конфига. Для country mapping
+использовать явные metadata/manifest; substring tag допустим только как
+временный fallback и только при однозначном результате.
+
+Неизвестный/отсутствующий канал должен давать понятную ошибку или быть скрыт в
+UI, а не silently fallback в `auto`.
+
+## 2.2. Рабочий selector
+
+Защищённый маршрут должен использовать:
+
+```text
+selector "proxy"
+```
+
+В selector входят только validated protected channels. `direct` не входит.
+Если selector не имеет рабочего канала, применяется `block`.
+
+`SelectServer("auto")` означает выбор политики AdaptiveController, а не
+передачу управления `urltest`.
+
+## 2.3. Исправить frontend/backend contract
+
+Проверить и исправить:
+
+- `running/starting/stopped/error` против `connected/connecting`;
+- отображение фактически выбранного outbound;
+- динамический список стран/каналов;
+- индексы RoutingCard после фильтрации служебных правил;
+- применение импортированного конфига;
+- hardcoded VLESS/Hysteria labels;
+- отсутствие fake active server.
+
+### Приёмка Фазы 2
+
+```text
+Auto/NL/доступные каналы работают по фактическому конфигу
+несуществующий tag невозможно выбрать
+protected traffic не переходит в direct незаметно
+в UI отображается реальный active channel
+```
+
+---
+
+# Фаза 3. Быстрая детекция и Circuit Breaker — P0
+
+## 3.1. Категории
+
+Использовать проверяемые операционные категории:
+
+```text
+NetworkDown
+DNSFailure
+ServerUnreachable
+TLSFailure
+ProtocolFailure
+ProtectedChannelUnavailable
+Degraded
+Unknown
+```
+
+«ТСПУ», «DPI» и «DME» — гипотезы объяснения, а не доказанный диагноз.
+
+## 3.2. Protected probe
+
+Probe обязан идти через активный selector channel. Успех прямого fallback не
+должен считаться успехом VPN.
+
+Использовать:
+
+- timeout 2–3 секунды;
+- два последовательных подтверждения отказа;
+- сброс Suspect после одного успешного probe;
+- при необходимости два независимых HTTP targets;
+- passive failure signals из логов только как триггер ускоренной проверки.
+
+## 3.3. Машина состояний
+
+```text
+Closed
+  └─ первый fail → Suspect
+       ├─ success → Closed
+       └─ второй fail → Open
+
+Open
+  └─ cooldown 10s/20s/40s/60s → HalfOpen
+
+HalfOpen
+  ├─ fail → Open + backoff
+  └─ 2 success → Closed + reset backoff
+```
+
+Для SLA обнаружения менее 10 секунд closed probe нельзя оставлять только раз в
+30 секунд. Использовать cadence около 5 секунд либо passive failure trigger.
+
+Recovery должен быть асинхронным, но сериализованным: одновременно выполняется
+не более одного reload/recovery operation.
+
+### Приёмка Фазы 3
+
+```text
+один сетевой blip не роняет туннель
+2 подтверждённых fail переводят канал в Open
+cooldown реально соблюдается
+HalfOpen → 2 success → Closed
+проверка не уходит в direct
+```
+
+---
+
+# Фаза 4. Реальный транспортный пул — P1
+
+## 4.1. Базовая линия
+
+Сначала принять только реально работающий Hysteria2 VPS. Документированные
+placeholder VLESS/FR endpoints не считаются каналами до live-теста серверной
+части.
+
+## 4.2. Второй независимый канал
+
+Добавить минимум один реально проверенный независимый канал:
+
+- отдельный VPS/IP;
+- или отдельный серверный протокол;
+- с отдельным health result и channel ID.
+
+Приёмка: отключение первого канала приводит к выбору второго без direct leak.
+
+## 4.3. WARP/AWG
+
+Порядок работ:
+
+1. Provision WARP credentials безопасно и вне публичного KV.
+2. Проверить plain WireGuard endpoint как базовую связность.
+3. Проверить AWG на фактической Windows-сборке, включая совместимый runtime.
+4. Добавить один рабочий AWG profile.
+5. После этого добавить I1-A/I1-B/I1-C.
+6. Каждый профиль проверить handshake и реальным HTTP/HTTPS трафиком.
+7. В памяти хранить ID профиля, не private key.
+
+Нельзя считать AWG готовым только потому, что поля `jc/i1` есть в JSON.
+
+WARP является независимой точкой выхода, но не гарантирует страну/colo и не
+заменяет отдельные geo endpoints.
+
+## 4.4. I1-ротация
+
+Сначала должен работать один профиль. Затем:
+
+```text
+I1-A → I1-B → I1-C
+```
+
+Junk-параметры менять последними. Не использовать неподтверждённые blobs,
+которые не приняты конкретным AWG runtime/server.
+
+## 4.5. Mieru — поздний внешний адаптер
+
+Native outbound в sing-box не добавлять. Если mieru потребуется:
+
+```text
+supervised mieru/mita process
+  → localhost SOCKS
+  → sing-box socks outbound
+  → selector
+```
+
+Запуск Karing оставить пользовательской альтернативой, но не считать его
+частью автоматического failover.
+
+### Приёмка Фазы 4
+
+```text
+минимум два validated protected channels
+каждый имеет отдельный descriptor и health state
+selector выбирает только validated channels
+direct не входит в protected pool
+```
+
+---
+
+# Фаза 5. ChannelMemory, метрики и domain intelligence — P1
+
+## 5.1. ChannelMemory
+
+Record должен получать фактически выбранный канал, а не просто первый outbound.
+
+Хранить:
+
+```text
+success/failure
+consecutive fail/ok
+EWMA latency
+last outcome
+cooldown
+profile/context id
+```
+
+Требования:
+
+- atomic save через temp + rename;
+- schema version;
+- debounce записи;
+- cap/LRU;
+- обработка повреждённого файла;
+- prune несуществующих каналов;
+- отсутствие секретов в key;
+- score влияет на следующий выбор;
+- unknown channel получает ограниченное exploration preference.
+
+Текущий `ChannelMemory.Best()` без интеграции в controller не считается
+реализованной адаптивностью.
+
+## 5.2. Метрики
+
+Не полагаться на необъявленный `127.0.0.1:9090`.
+
+Сделать `TrafficSource` интерфейс и отдельно проверить на pinned build:
+
+- включение `experimental.clash_api`;
+- build tag `with_clash_api`;
+- authentication;
+- `/connections`/traffic semantics;
+- работу на Windows embedded box.
+
+Если источник недоступен, UI показывает `нет данных`, а не ложные `0 B/s`.
+
+## 5.3. DomainStats
+
+Sniff log доказывает только обнаружение домена. Он не доказывает успех,
+latency или фактический outbound.
+
+Сначала подключить реальные detour/connection samples. До этого `DomainStats`
+остаётся диагностическим журналом и не меняет маршрутизацию.
+
+`GetBest(domain)` подключать только после появления достоверных samples и
+механизма применения выбора без reload на каждый запрос.
+
+### Приёмка Фазы 5
+
+```text
+падший канал не выбирается первым после рестарта
+memory file переживает restart
+Diagnostics показывает active/best channel и memory summary
+TrafficCard не врёт нулевыми значениями
+DomainStats не называет sniff событие успешным запросом
+```
+
+---
+
+# Фаза 6. Cloudflare, динамические конфиги и telemetry — P1/P2
+
+## 6.1. Worker
+
+Исправить:
+
+- синтаксис `worker.js`;
+- чтение `env.VPS_IP`/секретов через bindings;
+- передачу `request` в health-check;
+- отсутствие ложного обещания multi-edge checks;
+- фактический PUT/auth flow только если он нужен;
+- rate limit и schema validation;
+- разделение публичных metadata и приватных credentials;
+- ограничение CORS;
+- telemetry abuse protection.
+
+## 6.2. Windows integration
+
+`FetchConfig()` должен реально вызываться в startup/update flow, но только после
+валидации и безопасной схемы. Remote config не должен silently заменять
+последний рабочий конфиг.
+
+## 6.3. Health и telemetry
+
+Remote health — дополнительный signal:
+
+```text
+local probe fail + remote VPS alive → вероятен локальный barrier
+local probe fail + remote VPS dead → вероятен server failure
+```
+
+Это не абсолютное доказательство и не единственная причина reload.
+
+Telemetry — opt-in, без credentials/UUID/IP, с ограничением частоты.
+
+## 6.4. Version/release
+
+Сделать один источник версии и rollback last-known-good config. Сейчас версии
+landing/Worker/R2 расходятся.
+
+---
+
+# Фаза 7. Android и iOS — P2
+
+После стабилизации Windows-контракта:
+
+1. Зафиксировать общий `ChannelDescriptor`/config schema.
+2. Подтвердить Android-смартфонный тестовый контур через ADB.
+3. Выбрать одну iOS-реализацию; вторую заморозить или удалить.
+4. Проверить актуальность `libbox.aar` и PlatformInterface.
+5. Перенести selector/fail-closed/diagnostics, не копируя Windows-specific code.
+6. Добавить mobile-specific lifecycle: foreground service, Network Extension,
+   permissions, sleep/resume, battery.
+
+Android/iOS не входят в критерий Windows MVP.
+
+---
+
+## 3. Что сознательно не входит в MVP
+
+- zapret/byedpi/WinDivert;
+- WDTT/VK media relay;
+- собственный WARP relay;
+- белые списки операторов;
+- llimonix как runtime dependency;
+- гарантированный geo через WARP;
+- Hysteria2 Gecko в sing-box-lx без отдельной проверки;
+- полноценный Windows TUN/service mode;
+- автоматический Karing/mieru failover.
+
+`nip.io + Let's Encrypt` остаётся полезным способом получения настоящего TLS
+certificate для серверной инфраструктуры, но не является отдельным adaptive
+controller и не должен блокировать lifecycle MVP.
+
+---
+
+# 4. Проверки и команды
+
+## Локальная Windows-проверка
+
+```bash
+node --check configs/cloudflare/worker.js
+
+cd windows/frontend
+npm ci
+npm run build
+
+cd ..
+go test -race ./backend/core/...
+go vet ./...
+go build -tags "with_awg,with_wireguard,with_utls,with_gvisor" ./...
+
+# Полная Wails-сборка
+wails build -skipbindings -s -tags "with_awg,with_wireguard,with_utls,with_gvisor"
+```
+
+## Конфигурация
+
+```bash
+bash configs/sync-to-windows.sh
+# затем validator и sing-box check на точной pinned-сборке
+```
+
+## Live acceptance
+
+1. Start с рабочим config.
+2. Проверить RU/private direct policy.
+3. Проверить protected HTTP/HTTPS через active channel.
+4. Зафиксировать active channel в diagnostics.
+5. Имитировать отказ первого канала.
+6. Убедиться в переключении на второй validated channel.
+7. Убедиться, что direct не используется незаметно.
+8. Выполнить несколько Reload подряд.
+9. Проверить отсутствие роста goroutines.
+10. Перезапустить приложение и проверить memory-based ordering.
+11. Проверить ADB Android только после Windows acceptance.
+
+---
+
+# 5. Финальный критерий Windows MVP
+
+Система считается готовой, когда:
+
+1. release-конфиг валиден и не содержит placeholder;
+2. Start/Reload/Stop не оставляют зависших box/goroutines;
+3. `Wait()` корректен после success и error;
+4. `go test -race` и `go vet` проходят;
+5. AdaptiveController — единственный владелец выбора;
+6. protected traffic использует selector и fail-closed;
+7. обрыв обнаруживается в согласованный SLA;
+8. Circuit Breaker реально проходит cooldown/HalfOpen/Closed;
+9. есть минимум два реально проверенных protected channels;
+10. active channel точно виден в UI/Diagnostics;
+11. ChannelMemory меняет следующий выбор и переживает restart;
+12. TrafficCard не показывает выдуманные нулевые метрики;
+13. Cloudflare Worker синтаксически и функционально проверен;
+14. публичные endpoints не выдают private credentials;
+15. frontend/Go/Wails release build зелёные.
+
+> «Работает при любых блокировках» не является технически гарантируемым
+> утверждением. IP/ASN block требует нового endpoint, whitelist-режим требует
+> отдельной техники, geo-block требует отдельного выхода, а конкретный DPI
+> требует live-профилей. Этот план делает эти классы отказов наблюдаемыми и
+> управляемыми, а не обещает невозможную универсальность.

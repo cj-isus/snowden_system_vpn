@@ -50,9 +50,12 @@ func main() {
 			DisableWindowIcon:    false,
 		},
 		OnShutdown: func(ctx context.Context) {
-			log.Printf("[main] shutting down, clearing proxy")
-			_ = clearSystemProxy()
+			log.Printf("[main] shutting down, stopping adaptive monitor and engine")
 			app.adaptive.Stop()
+			if err := app.manager.StopVPN(); err != nil {
+				log.Printf("[main] engine shutdown warning: %v", err)
+			}
+			_ = clearSystemProxy()
 		},
 	})
 

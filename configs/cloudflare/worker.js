@@ -18,47 +18,50 @@
 
 // ─── Dynamic Config ───
 
-// Default config — uses actual credentials. In production, override via KV.
-// env?.VLESS_UUID is not available at module scope, so we hardcode here.
-const DEFAULT_CONFIG = {
-  servers: [
-    {
-      id: "vps-nl",
-      name: "VPS Netherlands",
-      address: "env.VPS_IP || "YOUR_VPS_IP"",
-      port: 443,
-      protocol: "vless+tls",
-      domain: "YOUR_DOMAIN.nip.io",
-      uuid: "env.VLESS_UUID || "YOUR_UUID"",
-      active: true
+// Public fallback config. Private credentials are deliberately not returned by
+// /api/config; authenticated provisioning must deliver them separately.
+function defaultConfig(env) {
+  const vpsAddress = env.VPS_IP || "YOUR_VPS_IP";
+  const domain = env.VPN_DOMAIN || "YOUR_DOMAIN.nip.io";
+
+  return {
+    servers: [
+      {
+        id: "vps-nl",
+        name: "VPS Netherlands",
+        address: vpsAddress,
+        port: 443,
+        protocol: "vless+tls",
+        domain,
+        active: true
+      },
+      {
+        id: "hysteria2",
+        name: "Hysteria2 (UDP)",
+        address: vpsAddress,
+        port: 8443,
+        protocol: "hysteria2",
+        domain,
+        active: true
+      },
+      {
+        id: "warp-cf",
+        name: "WARP Cloudflare",
+        address: "162.159.192.1",
+        port: 4500,
+        protocol: "wireguard",
+        publicKey: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH00JuVo51h2wPfgyo=",
+        active: false
+      }
+    ],
+    routing: {
+      ruCidrUrl: "https://raw.githubusercontent.com/itdoginfo/allow-domains/refs/heads/main/Services/meta.lst",
+      splitTunneling: true
     },
-    {
-      id: "hysteria2",
-      name: "Hysteria2 (UDP)",
-      address: "env.VPS_IP || "YOUR_VPS_IP"",
-      port: 8443,
-      protocol: "hysteria2",
-      domain: "YOUR_DOMAIN.nip.io",
-      password: "env.HY2_PASS || "YOUR_PASSWORD"",
-      active: true
-    },
-    {
-      id: "warp-cf",
-      name: "WARP Cloudflare",
-      address: "162.159.192.1",
-      port: 4500,
-      protocol: "wireguard",
-      publicKey: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-      active: false
-    }
-  ],
-  routing: {
-    ruCidrUrl: "https://raw.githubusercontent.com/itdoginfo/allow-domains/refs/heads/main/Services/meta.lst",
-    splitTunneling: true
-  },
-  version: "1.0.0",
-  updatedAt: "2026-07-09"
-};
+    version: "1.0.0",
+    updatedAt: new Date().toISOString()
+  };
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -119,19 +122,19 @@ export default {
       // ─── GET /api/config ───
       if (path === "/api/config" && request.method === "GET") {
         // Try KV first, fallback to default
-        let config = DEFAULT_CONFIG;
+        let config = defaultConfig(env);
         if (env.SNOWDEN_CONFIG) {
           const kvConfig = await env.SNOWDEN_CONFIG.get("config");
           if (kvConfig) {
             config = JSON.parse(kvConfig);
           }
         }
-        return jsonResponse(config, corsHeaders);
+        return jsonResponse(publicConfig(config), corsHeaders);
       }
 
       // ─── GET /api/health ───
       if (path === "/api/health" && request.method === "GET") {
-        const results = await checkVpsHealth();
+        const results = await checkVpsHealth(request, env);
         return jsonResponse(results, corsHeaders);
       }
 
@@ -164,7 +167,7 @@ export default {
 
       // ─── GET / (status page) ───
       if (path === "/" || path === "") {
-        const health = await checkVpsHealth();
+        const health = await checkVpsHealth(request, env);
         return jsonResponse({
           status: "online",
           service: "snowden.system",
@@ -182,11 +185,32 @@ export default {
   }
 };
 
+// Remove credentials from the unauthenticated metadata endpoint. This is not a
+// replacement for authenticated config delivery; it is a safety boundary for
+// the public fallback/KV route.
+function publicConfig(config) {
+  return {
+    ...config,
+    servers: (config.servers || []).map((server) => {
+      const {
+        uuid,
+        password,
+        privateKey,
+        private_key,
+        token,
+        secret,
+        ...metadata
+      } = server;
+      return metadata;
+    })
+  };
+}
+
 // ─── Edge Health Check ───
 
-async function checkVpsHealth() {
-  const vpsHost = "env.VPS_IP || "YOUR_VPS_IP"";
-  const colo = (typeof request !== 'undefined' && request.cf) ? request.cf.colo : "unknown";
+async function checkVpsHealth(request, env) {
+  const vpsHost = env.VPS_IP || "YOUR_VPS_IP";
+  const colo = request?.cf?.colo || "unknown";
 
   // Test TCP connectivity from CF edge to VPS
   const tests = {};

@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // VPNStatus is the JSON-friendly snapshot the UI binds to. Wails generates the
 // TypeScript bindings from this struct, so keep field names stable and exported.
 type VPNStatus struct {
-	State     string `json:"state"`      // "stopped" | "starting" | "running" | "stopping" | "error"
-	ConfigID  string `json:"configId"`   // which config is active (human label)
-	Message   string `json:"message"`    // last error / status detail
-	Connected bool   `json:"connected"`  // convenience: true iff state == running
+	State     string `json:"state"`     // "stopped" | "starting" | "running" | "stopping" | "error"
+	ConfigID  string `json:"configId"`  // which config is active (human label)
+	Message   string `json:"message"`   // last error / status detail
+	Connected bool   `json:"connected"` // convenience: true iff state == running
 }
 
 // Manager is the high-level facade the Wails layer talks to. It owns an Engine
@@ -43,13 +44,75 @@ type Manager struct {
 	// domainStats remembers which outbound works best per-domain.
 	domainStats *DomainStatsRegistry
 
+	// metricsStop / metricsWG let us run exactly ONE sampling goroutine and stop
+	// it cleanly, so repeated Reloads do not leak goroutines (each one would
+	// otherwise double-sample traffic and double-feed domain stats).
+	metricsMu     sync.Mutex
+	metricsStop   chan struct{}
+	metricsWG     sync.WaitGroup
+	metricsActive atomic.Int32 // live sampling goroutines (must stay ≤ 1)
+
 	// lastError carries the most recent failure message for the UI.
 	lastError string
 }
 
 // NewManager wires an Engine into a fresh Manager.
 func NewManager(engine *Engine) *Manager {
-	return &Manager{engine: engine, metrics: NewMetrics(), domainStats: NewDomainStatsRegistry()}
+	return &Manager{
+		engine:      engine,
+		metrics:     NewMetrics(),
+		domainStats: NewDomainStatsRegistry(),
+	}
+}
+
+// startMetrics idempotently spawns a single sampling goroutine. Reloads reuse
+// the same worker. Callers hold the manager lifecycle mutex while starting or
+// stopping it so a Stop cannot race a delayed StartMetrics call.
+func (m *Manager) startMetrics() {
+	m.metricsMu.Lock()
+	defer m.metricsMu.Unlock()
+
+	if m.metricsStop != nil {
+		return
+	}
+
+	stop := make(chan struct{})
+	m.metricsStop = stop
+	m.metricsWG.Add(1)
+	m.metricsActive.Add(1)
+	go func() {
+		defer m.metricsWG.Done()
+		defer m.metricsActive.Add(-1)
+
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if m.engine.Running() {
+					m.metrics.sample()
+					m.PollConnections()
+				}
+			}
+		}
+	}()
+}
+
+// stopMetrics stops any running sampling goroutine and waits for it to exit.
+// Safe to call when metrics were never started. The lifecycle mutex prevents a
+// concurrent start from adding to the WaitGroup while it is being drained.
+func (m *Manager) stopMetrics() {
+	m.metricsMu.Lock()
+	defer m.metricsMu.Unlock()
+
+	if m.metricsStop == nil {
+		return
+	}
+	close(m.metricsStop)
+	m.metricsStop = nil
+	m.metricsWG.Wait()
 }
 
 // StartVPN starts the engine with a named config payload. configID is a label
@@ -61,27 +124,21 @@ func (m *Manager) StartVPN(configID string, configJSON []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if err := m.engine.Start(configJSON); err != nil {
+	// Own a private immutable snapshot. Callers (Wails/Telegram/tests) may reuse
+	// or mutate their input slice after this method returns.
+	snapshot := append([]byte(nil), configJSON...)
+	if err := m.engine.Start(snapshot); err != nil {
 		if !errors.Is(err, ErrAlreadyRunning) {
 			m.lastError = err.Error()
 		}
 		return err
 	}
 	m.activeConfigID = configID
-	m.activeConfigJSON = configJSON
+	m.activeConfigJSON = snapshot
 	m.lastError = ""
 	m.metrics.Start()
-	go m.metricsLoop()
+	m.startMetrics()
 	return nil
-}
-
-// metricsLoop samples traffic counters every second while the engine runs.
-func (m *Manager) metricsLoop() {
-	for m.engine.Running() {
-		m.metrics.sample()
-		m.PollConnections() // feed per-domain stats from live connections
-		time.Sleep(time.Second)
-	}
 }
 
 // StopVPN gracefully stops the engine. Safe to call when already stopped.
@@ -89,6 +146,10 @@ func (m *Manager) StopVPN() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Keep the same lock order as StartVPN/ReloadVPN (manager → metrics). This
+	// prevents a Stop that starts while StartVPN is between engine.Start and
+	// startMetrics from leaving a fresh worker behind after the engine closes.
+	m.stopMetrics()
 	m.metrics.Stop()
 	if err := m.engine.Close(); err != nil && !errors.Is(err, ErrAlreadyStopping) {
 		m.lastError = err.Error()
@@ -102,20 +163,18 @@ func (m *Manager) StopVPN() error {
 // Stopped state to observers. The configID updates atomically with the swap.
 func (m *Manager) ReloadVPN(configID string, configJSON []byte) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	if err := m.engine.Reload(configJSON); err != nil {
+	snapshot := append([]byte(nil), configJSON...)
+	if err := m.engine.Reload(snapshot); err != nil {
 		m.lastError = err.Error()
-		m.mu.Unlock()
 		return err
 	}
 	m.activeConfigID = configID
-	m.activeConfigJSON = configJSON
+	m.activeConfigJSON = snapshot
 	m.lastError = ""
 	m.metrics.Start() // reset traffic timers
-	m.mu.Unlock()
-
-	// Restart metrics loop outside the lock (Reload may have stopped the old one).
-	go m.metricsLoop()
+	m.startMetrics()
 	return nil
 }
 
@@ -142,7 +201,7 @@ func (m *Manager) SetLogHandler(h LogHandler) {
 // TCP ping to each server.
 func (m *Manager) GetServers() []ServerInfo {
 	m.mu.Lock()
-	cfg := m.activeConfigJSON
+	cfg := append([]byte(nil), m.activeConfigJSON...)
 	activeID := m.activeConfigID
 	m.mu.Unlock()
 
@@ -172,7 +231,7 @@ func (m *Manager) GetServers() []ServerInfo {
 // GetRouteRules returns the route rules parsed from the active config.
 func (m *Manager) GetRouteRules() []RouteRuleInfo {
 	m.mu.Lock()
-	cfg := m.activeConfigJSON
+	cfg := append([]byte(nil), m.activeConfigJSON...)
 	m.mu.Unlock()
 	return ParseRouteRules(cfg)
 }
@@ -186,7 +245,7 @@ func (m *Manager) GetTraffic() TrafficStats {
 func (m *Manager) ActiveConfigJSON() []byte {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.activeConfigJSON
+	return append([]byte(nil), m.activeConfigJSON...)
 }
 
 // ProbeLatency measures HTTP latency through the local proxy (if running).

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"snowden-system/backend/cfclient"
-	"snowden-system/backend/config"
 	"snowden-system/backend/core"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -91,6 +90,10 @@ func NewApp() *App {
 	adaptive := core.NewAdaptiveEngine(engine)
 	engine.SetClassifier(adaptive.Classifier())
 	manager := core.NewManager(engine)
+	// Adaptive recovery must go through Manager so engine reloads also update
+	// metrics and the active-config snapshot. It must not bypass lifecycle with
+	// a direct Engine.Reload call.
+	adaptive.SetRecoveryFunc(manager.ReloadVPN)
 	app := &App{manager: manager, adaptive: adaptive, cfClient: cfclient.New()}
 	app.tray = newTrayManager(app)
 	if token := getTgToken(); token != "" {
@@ -212,17 +215,6 @@ func indexOfStr(s, sub string) int {
 func (a *App) StartVPN(configID string, configJSON string) error {
 	log.Printf("[StartVPN] configID=%s bytes=%d", configID, len(configJSON))
 
-	// Remove stale cache.db — sing-box hangs on corrupted cache from previous run.
-	if exePath, err := os.Executable(); err == nil {
-		for _, f := range []string{"cache.db", "cache.db-journal"} {
-			p := filepath.Join(filepath.Dir(exePath), f)
-			if _, err := os.Stat(p); err == nil {
-				os.Remove(p)
-				log.Printf("[StartVPN] removed stale %s", f)
-			}
-		}
-	}
-
 	err := a.manager.StartVPN(configID, []byte(configJSON))
 	if err != nil {
 		log.Printf("[StartVPN] FAILED: %v", err)
@@ -258,7 +250,13 @@ func (a *App) StopVPN() error {
 
 // ReloadVPN swaps the active config without a transient stop.
 func (a *App) ReloadVPN(configID string, configJSON string) error {
-	return a.manager.ReloadVPN(configID, []byte(configJSON))
+	config := []byte(configJSON)
+	if err := a.manager.ReloadVPN(configID, config); err != nil {
+		return err
+	}
+	// Keep adaptive recovery on the same snapshot after a UI/Telegram reload.
+	a.adaptive.UpdateConfig(configID, config)
+	return nil
 }
 
 // Status returns the current VPN state snapshot.
@@ -383,17 +381,12 @@ func (a *App) SelectServer(server string) error {
 		return fmt.Errorf("no route section")
 	}
 
-	// Map friendly name to outbound tag
-	var finalOutbound string
-	switch server {
-	case "auto":
-		finalOutbound = "auto"
-	case "nl":
-		finalOutbound = "grpc-nl" // fastest NL outbound
-	case "fr":
-		finalOutbound = "grpc-fr" // fastest FR outbound
-	default:
-		return fmt.Errorf("unknown server: %s (use: auto, nl, fr)", server)
+	// Map friendly name to outbound tag by resolving against the ACTUAL
+	// outbounds in config (the config is the source of truth, not hardcoded
+	// names). "auto" → urltest group; "nl"/"fr" → tag containing the code.
+	finalOutbound, err := core.ResolveOutboundTag(server, cfg)
+	if err != nil {
+		return fmt.Errorf("resolve server %q: %w", server, err)
 	}
 
 	route["final"] = finalOutbound
@@ -405,7 +398,7 @@ func (a *App) SelectServer(server string) error {
 	}
 
 	log.Printf("[SelectServer] → %s (final=%s), reloading", server, finalOutbound)
-	return a.manager.ReloadVPN(a.manager.Status().ConfigID, newCfg)
+	return a.ReloadVPN(a.manager.Status().ConfigID, string(newCfg))
 }
 
 // ToggleRouteRule enables/disables a route rule by index and reloads the config.
@@ -458,7 +451,7 @@ func (a *App) ToggleRouteRule(ruleIndex int, enabled bool) error {
 	}
 
 	log.Printf("[ToggleRouteRule] rule %d → enabled=%v, reloading", ruleIndex, enabled)
-	return a.manager.ReloadVPN(a.manager.Status().ConfigID, newCfg)
+	return a.ReloadVPN(a.manager.Status().ConfigID, string(newCfg))
 }
 
 // ExportConfig saves the active config to a file path (Wails frontend dialog
@@ -601,60 +594,4 @@ func (a *App) LoadConfigFile(name string) (string, error) {
 	// RU CIDR (11401 правил) замедляет route matching → убрано.
 	log.Printf("[LoadConfigFile] config loaded (%d bytes, domain split-tunnel only)", len(raw))
 	return string(raw), nil
-}
-
-// injectSplitTunnel finds ru-cidr.lst, converts it to a sing-box source rule-set,
-// and injects a direct rule into the config JSON.
-func injectSplitTunnel(configJSON []byte) ([]byte, error) {
-	var cidrRaw string
-	if exePath, err := os.Executable(); err == nil {
-		full := filepath.Join(filepath.Dir(exePath), "assets", "configs", "ru-cidr.lst")
-		if data, err := os.ReadFile(full); err == nil {
-			cidrRaw = string(data)
-		}
-	}
-	if cidrRaw == "" {
-		return nil, fmt.Errorf("ru-cidr.lst not found")
-	}
-
-	exeDir, _ := os.Executable()
-	dir := filepath.Dir(exeDir)
-	rsPath, err := config.EnsureCIDRFile(cidrRaw, dir)
-	if err != nil {
-		return nil, err
-	}
-
-	var cfg map[string]any
-	if err := json.Unmarshal(configJSON, &cfg); err != nil {
-		return nil, err
-	}
-
-	route, _ := cfg["route"].(map[string]any)
-	if route == nil {
-		route = map[string]any{}
-	}
-
-	rs := map[string]any{
-		"type":   "local",
-		"tag":    "ru-cidr",
-		"format": "source",
-		"path":   rsPath,
-	}
-	var existingSets []any
-	if raw, ok := route["rule_set"].([]any); ok {
-		existingSets = raw
-	}
-	route["rule_set"] = append(existingSets, rs)
-
-	rules, _ := route["rules"].([]any)
-	newRule := map[string]any{"rule_set": []string{"ru-cidr"}, "action": "direct"}
-	if len(rules) >= 2 {
-		rules = append(rules[:2], append([]any{newRule}, rules[2:]...)...)
-	} else {
-		rules = append(rules, newRule)
-	}
-	route["rules"] = rules
-	cfg["route"] = route
-
-	return json.MarshalIndent(cfg, "", "  ")
 }
