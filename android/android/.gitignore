@@ -12,3 +12,7 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+
+# Local pinned sing-box Android AAR (build artifact, downloaded by build_android.bat)
+android/app/libs/libbox.aar
+android/app/libs/libbox-*.aar
