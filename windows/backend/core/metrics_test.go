@@ -85,6 +85,23 @@ func TestResolveOutboundTagNoURLTest(t *testing.T) {
 		map[string]string{"type": "hysteria2", "tag": "hysteria2-nl", "server": "1.2.3.4", "server_port": "8443"},
 	)
 	if _, err := ResolveOutboundTag("auto", cfg); err == nil {
-		t.Fatal("missing urltest must return an error")
+		t.Fatal("missing selector/urltest must return an error")
+	}
+}
+
+func TestResolveOutboundTagRejectsChannelOutsideSelector(t *testing.T) {
+	cfg := testCfgWith(
+		map[string]string{"type": "selector", "tag": "proxy"},
+		map[string]string{"type": "hysteria2", "tag": "hy2-nl", "server": "1.2.3.4", "server_port": "8443"},
+		map[string]string{"type": "vless", "tag": "vless-fr", "server": "5.6.7.8", "server_port": "443"},
+	)
+	// Add the actual selector candidates explicitly because testCfgWith only
+	// models the fields needed by the parser.
+	cfg = []byte(`{"outbounds":[{"type":"selector","tag":"proxy","outbounds":["hy2-nl"]},{"type":"hysteria2","tag":"hy2-nl","server":"1.2.3.4","server_port":8443},{"type":"vless","tag":"vless-fr","server":"5.6.7.8","server_port":443}],"route":{"final":"proxy"}}`)
+	if _, err := ResolveOutboundTag("fr", cfg); err == nil {
+		t.Fatal("channel outside protected selector must not be selectable")
+	}
+	if got, err := ResolveOutboundTag("nl", cfg); err != nil || got != "hy2-nl" {
+		t.Fatalf("selector channel nl = %q, err %v", got, err)
 	}
 }

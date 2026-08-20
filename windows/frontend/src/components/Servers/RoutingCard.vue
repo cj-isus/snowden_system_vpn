@@ -22,18 +22,20 @@ const toggling = ref<string | null>(null)
 async function refresh() {
   try {
     const list = await GetRouteRules()
-    if (list && list.length > 0) {
-      rules.value = (list as any[]).map((r, i) => ({
-        id: r.id,
-        icon: r.icon,
-        title: r.title,
-        sub: r.sub,
-        sub2: "",
-        route: r.route,
-        on: r.on,
-        ruleIndex: i,
-      }))
-    }
+    const actualRules = (list || []).filter(rule => /^rule-\d+$/.test(String(rule.id || "")))
+    rules.value = actualRules.map((r, i) => ({
+      id: r.id,
+      icon: r.icon,
+      title: r.title,
+      sub: r.sub,
+      sub2: "",
+      route: r.route,
+      on: r.on,
+      // Backend IDs preserve the original route.rules index even when
+      // service rules (sniff/hijack-dns) are omitted from the UI.
+      ruleIndex: backendRuleIndex(String(r.id || ""), i),
+    }))
+    
   } catch {} finally {
     loading.value = false
   }
@@ -41,7 +43,10 @@ async function refresh() {
 
 onMounted(() => { refresh() })
 
-const otherOn = ref(true)
+function backendRuleIndex(id: string, fallback: number): number {
+  const match = /^rule-(\d+)$/.exec(id)
+  return match ? Number(match[1]) : fallback
+}
 
 async function toggleRule(rule: Rule) {
   if (toggling.value) return

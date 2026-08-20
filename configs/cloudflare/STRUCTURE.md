@@ -1,32 +1,33 @@
-# STRUCTURE.md — configs/cloudflare/
+# STRUCTURE.md — `configs/cloudflare/`
 
-> Cloudflare-инфраструктура: Worker (API статуса/обновлений), r2-раздача, D1-телеметрия.
+Cloudflare is a metadata and edge-observation layer. It is not the owner of the
+local VPN channel and does not prove that the user's ISP can reach a VPS.
 
-## Файлы
-| Файл | Роль |
-|------|------|
-| `worker.js` | Основной Worker: `/api/config`, `/api/health`, `/api/version`, `/api/telemetry`, `/` |
-| `r2-worker.js` | Worker раздачи обновлений (R2) |
-| `wrangler.toml` / `.example` | Конфиг deploy (KV `SNOWDEN_CONFIG`, `SNOWDEN_VERSION`, D1 `DB`) — секрет |
-| `r2-wrangler.toml` | Конфиг R2-раздачи |
-| `schema.sql` | D1-схема телеметрии (таблица events) |
-| `README.md` | Инструкция деплоя (wrangler v4) |
+## Files
 
-## Endpoints (worker.js)
-| Endpoint | Метод | Что |
-|----------|-------|-----|
-| `/api/config` | GET | Динамический конфиг (серверы, протоколы) — клиент обновляется без пересборки |
-| `/api/health` | GET | Edge health-check VPS (с дата-центров CF) — отличает «заблокирован» от «упал» |
-| `/api/version` | GET | Версия + ссылка скачивания |
-| `/api/telemetry` | POST | Анонимная телеметрия → D1 (region/event/protocol/latency) |
-| `/` | GET | Status page (JSON) |
+| File | Role |
+|---|---|
+| `worker.js` | Worker routes, public config metadata, edge health and optional telemetry |
+| `r2-worker.js` | separate R2 download worker |
+| `wrangler.toml.example` | public binding/config example |
+| `wrangler.toml` | local deployment config; do not commit credentials |
+| `schema.sql` | D1 telemetry schema |
+| `README.md` | deploy and KV/D1 setup instructions |
 
-## KV/D1
-- `SNOWDEN_CONFIG` — динамический конфиг JSON (перезаписывается через `wrangler kv:key put`).
-- `SNOWDEN_VERSION` — строка версии + download URL.
-- `DB` (D1 `snowden-telemetry`) — события; без UUID/IP.
+## Endpoints in `worker.js`
 
-## Связь с кодом
-- Go `backend/cfclient` (Windows) дергает `/api/config`, `/api/health`, `/api/version`, `/api/telemetry`.
-- `app.GetRemoteHealth`, `app.CheckForUpdate` — через cfclient.
-- Клиентский файл конфига приложения: update через `landing/version.json` или `/api/version`.
+| Endpoint | Meaning |
+|---|---|
+| `GET /api/config` | public metadata only; `publicConfig` strips UUID/password/private key/token/secret fields |
+| `GET /api/health` | fetches VPS/Internet checks from the current Cloudflare edge; informational, not local-path proof |
+| `GET /api/version` | version metadata from KV |
+| `POST /api/telemetry` | optional anonymous event storage in D1; no credentials |
+| `/`, `/version.json`, download paths | KV-backed landing/version/download responses |
+
+## Safety rules
+
+- VPS address/domain come from Worker bindings (`VPS_IP`, `VPN_DOMAIN`) or a
+  deliberately non-working placeholder fallback.
+- The Worker must never manufacture or return client UUID/password/private key.
+- `node --check worker.js` is the minimum syntax gate. Production health is
+  accepted only after a real Worker deployment and edge request.

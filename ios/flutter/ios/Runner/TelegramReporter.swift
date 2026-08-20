@@ -15,14 +15,17 @@ class TelegramReporter {
     static let shared = TelegramReporter()
 
     // Bot credentials — те же что и на Android/ПК
-    private let botToken = "8967390873:AAG9HAUIw6JrySmLX_Xu-fKPNNFl23rapqY"
-    private let chatId = "6569139926"
+    // Credentials are injected by a private build configuration, never source.
+    private let botToken: String
+    private let chatId: String
 
-    private var deviceName: String = "iOS"
+    private var deviceName: String
     private var lastReportTime: Date = .distantPast
     private let minReportGap: TimeInterval = 30 * 60 // 30 min
 
     private init() {
+        botToken = Bundle.main.object(forInfoDictionaryKey: "SNOWDEN_TG_TOKEN") as? String ?? ""
+        chatId = Bundle.main.object(forInfoDictionaryKey: "SNOWDEN_TG_CHAT_ID") as? String ?? ""
         deviceName = "\(UIDevice.current.name) (\(UIDevice.current.model))"
     }
 
@@ -60,6 +63,10 @@ class TelegramReporter {
 
     /// HTTPS POST к api.telegram.org/bot.../sendMessage
     private func send(_ text: String) {
+        guard !botToken.isEmpty, !chatId.isEmpty else {
+            NSLog("[TelegramReporter] disabled: local credentials are not provisioned")
+            return
+        }
         let urlString = "https://api.telegram.org/bot\(botToken)/sendMessage"
         guard let url = URL(string: urlString) else { return }
 

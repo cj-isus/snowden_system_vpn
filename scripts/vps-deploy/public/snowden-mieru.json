@@ -16,10 +16,10 @@
     {
       "type": "mieru",
       "tag": "mieru-out",
-      "server": "192.109.206.234",
+      "server": "YOUR_VPS_IP",
       "server_port": 8964,
       "username": "snowden",
-      "password": "91HWB-qqBkWl3cb2VsS8wg",
+      "password": "YOUR_MIERU_PASSWORD",
       "transport": "TCP"
     },
     {"type": "direct", "tag": "direct"},

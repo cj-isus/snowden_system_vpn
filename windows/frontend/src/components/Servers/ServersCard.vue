@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { ref, onMounted, onUnmounted, inject } from "vue"
+import { ref, computed, onMounted, onUnmounted, inject } from "vue"
 import { GetServers, SelectServer } from "../../../wailsjs/go/main/App"
 
 const props = defineProps<{ configId: string; connected: boolean }>()
@@ -25,15 +25,25 @@ let pollTimer: number | undefined
 async function refresh() {
   try {
     const list = await GetServers()
-    if (list && list.length > 0) {
-      servers.value = list as Server[]
-    }
+    servers.value = (list || []) as Server[]
+    const active = servers.value.find(server => server.active)
+    if (active) selectedServer.value = active.id
   } catch (e) {
     // backend not ready yet
   } finally {
     loading.value = false
   }
 }
+
+const serverOptions = computed(() => [
+  { id: "auto", label: "🤖 Адаптивно" },
+  ...servers.value.map(server => ({
+    id: server.id,
+    label: server.location && server.location !== "VPS"
+      ? server.location
+      : server.name,
+  })),
+])
 
 onMounted(() => {
   refresh()
@@ -51,8 +61,8 @@ async function switchServer(server: string) {
   selectedServer.value = server
   try {
     await SelectServer(server)
-    const labels: Record<string, string> = { auto: "Авто (urltest)", nl: "Нидерланды", fr: "Франция" }
-    showToast?.(`Сервер → ${labels[server] || server}`, "success")
+    const label = serverOptions.value.find(option => option.id === server)?.label || server
+    showToast?.(`Канал → ${label}`, "success")
   } catch (e: any) {
     selectedServer.value = old
     showToast?.(`Ошибка: ${e?.message || e}`, "error")
@@ -88,7 +98,9 @@ function pingColor(p: number): string {
         :key="server.id"
         class="server-row"
         :class="{ active: server.active, inactive: !server.active }"
+        @click="switchServer(server.id)"
       >
+
         <div class="server-radio">
           <div class="radio-outer" :class="{ on: server.active }">
             <div class="radio-inner" v-if="server.active" />
@@ -118,20 +130,12 @@ function pingColor(p: number): string {
       <span class="mode-label">Сервер:</span>
       <div class="server-buttons">
         <button
+          v-for="option in serverOptions"
+          :key="option.id"
           class="srv-btn"
-          :class="{ active: selectedServer === 'auto', disabled: switching }"
-          @click="switchServer('auto')"
-        >🤖 Авто</button>
-        <button
-          class="srv-btn"
-          :class="{ active: selectedServer === 'nl', disabled: switching }"
-          @click="switchServer('nl')"
-        >🇳🇱 Нидерланды</button>
-        <button
-          class="srv-btn"
-          :class="{ active: selectedServer === 'fr', disabled: switching }"
-          @click="switchServer('fr')"
-        >🇫🇷 Франция</button>
+          :class="{ active: selectedServer === option.id, disabled: switching }"
+          @click.stop="switchServer(option.id)"
+        >{{ option.label }}</button>
       </div>
     </div>
   </div>

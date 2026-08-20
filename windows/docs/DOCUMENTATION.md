@@ -47,7 +47,7 @@
 | Ядро | sing-box-lx v1.14.0-lx.2 (embedded) |
 | Протокол | VLESS+TLS (основной), Hysteria2 (резерв) |
 | Сертификат | Let's Encrypt (через nip.io) |
-| VPS | 192.109.206.234 (Нидерланды), BBR, 600 Мбит/с |
+| VPS | YOUR_VPS_IP (Нидерланды), BBR, 600 Мбит/с |
 | Скорость через туннель | ~40 Мбит/с стабильно |
 
 ---
@@ -120,8 +120,8 @@ wails build -s -tags "with_awg,with_wireguard,with_utls,with_gvisor"
 ┌─────────▼─────────────────────────────────────────────────────┐
 │   sing-box-lx (embedded)                                       │
 │   mixed-in(127.0.0.1:20808) → route rules → urltest[auto]     │
-│   VLESS+TLS → VPS (192.109.206.234:443)                       │
-│   Hysteria2 → VPS (192.109.206.234:8443/UDP)                  │
+│   VLESS+TLS → VPS (YOUR_VPS_IP:443)                       │
+│   Hysteria2 → VPS (YOUR_VPS_IP:8443/UDP)                  │
 └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -307,7 +307,7 @@ Worker использует переменные окружения (`env.VLESS_
 ### Параметры
 | Параметр | Значение |
 |---|---|
-| IP | 192.109.206.234 |
+| IP | YOUR_VPS_IP |
 | ОС | Ubuntu 24.04 LTS |
 | CPU | 1 ядро Xeon Skylake |
 | RAM | 2 GB |

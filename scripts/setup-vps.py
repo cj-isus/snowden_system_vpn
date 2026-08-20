@@ -1,25 +1,29 @@
 """
 Setup VLESS+Reality on the VPS via SSH (paramiko).
-Runs the hardening + sing-box install + key generation, prints keys for client.
+Runs hardening, sing-box install and key generation without printing credentials.
 """
 import os
 import paramiko
 import sys
 import time
 
-HOST = os.environ["SNOWDEN_VPS_IP"]
+from env import load_project_env, require_env
+
+load_project_env()
+
+HOST = require_env("SNOWDEN_VPS_IP")
 PORT = int(os.environ.get("SNOWDEN_VPS_SSH_PORT", "22"))
 USER = os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
-PASS = os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
+PASS = require_env("SNOWDEN_VPS_SSH_PASSWORD")
 
-def run(client, cmd, timeout=180):
-    """Run command, print combined output, return (exit_code, output)."""
+def run(client, cmd, timeout=180, show_output=True):
+    """Run command and return (exit_code, output); sensitive output can be hidden."""
     stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout, get_pty=True)
     out = stdout.read().decode("utf-8", errors="replace")
     err = stderr.read().decode("utf-8", errors="replace")
     code = stdout.channel.recv_exit_status()
     combined = (out + err).strip()
-    if combined:
+    if show_output and combined:
         print(f"$ {cmd}")
         print(combined)
         print(f"[exit {code}]")
@@ -51,10 +55,9 @@ def main():
 
     # Step 4: generate keys
     print("\n>>> STEP 4: generate Reality keypair + UUID + short_id")
-    _, priv = run(client, "sing-box generate reality-keypair | grep -i private | awk '{print $2}'")
-    _, pub = run(client, "sing-box generate reality-keypair | grep -i public | awk '{print $2}'")
-    # NOTE: reality-keypair outputs both lines on one call; re-do single clean call
-    _, keys = run(client, "sing-box generate reality-keypair")
+    # The command returns both keys. Keep its output in memory and never print
+    # it: the private key must not enter the terminal scrollback or CI logs.
+    _, keys = run(client, "sing-box generate reality-keypair", show_output=False)
     # parse
     priv = pub = ""
     for line in keys.splitlines():
@@ -148,7 +151,8 @@ def main():
     print("Client profile generated locally; credentials are not printed.")
 
     # save client config locally too
-    with open(os.environ["SNOWDEN_CLIENT_CONFIG_PATH"], "w", encoding="utf-8") as f:
+    client_config_path = require_env("SNOWDEN_CLIENT_CONFIG_PATH")
+    with open(client_config_path, "w", encoding="utf-8") as f:
         # wrap into a full sing-box config with mixed inbound + route
         full = f'''{{
   "log": {{ "level": "info", "timestamp": true }},
@@ -203,12 +207,12 @@ def main():
     "auto_detect_interface": true
   }},
   "experimental": {{
-    "clash_api": {{ "external_controller": "127.0.0.1:9090", "secret": "dev-secret-change-me" }}
+    "clash_api": {{ "external_controller": "127.0.0.1:9090", "secret": "YOUR_CLASH_API_SECRET" }}
   }}
 }}
 '''
         f.write(full)
-    print("client config saved to SNOWDEN_CLIENT_CONFIG_PATH")
+    print("client config saved to SNOWDEN_CLIENT_CONFIG_PATH (path value not printed)")
 
     client.close()
     print("\n=== DONE ===")

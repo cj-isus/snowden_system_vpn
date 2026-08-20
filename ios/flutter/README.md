@@ -6,10 +6,9 @@
 Android с адаптацией под Network Extension.
 
 ## Возможности
-- ✅ VLESS+TLS через VPS (Нидерланды)
-- ✅ Hysteria2 (UDP, резерв)
+- ✅ Hysteria2 через provisioned VPS
 - ✅ Split-tunneling (РФ → direct, заблокированные → VPN)
-- ✅ urltest (автовыбор протокола)
+- ✅ selector-owned protected route
 - ✅ Telegram-репортер (статус на iPhone в Telegram)
 - ✅ Логи sing-box в реальном времени
 - ✅ Один интерфейс — одна кнопка
@@ -30,10 +29,9 @@ Android с адаптацией под Network Extension.
 
 ## Сервер
 ```
-VPS: 192.109.206.234 (Нидерланды)
-VLESS: 443/TCP + TLS (Let's Encrypt)
-Hysteria2: 8443/UDP
-Домен: snowden-system.192-109-206-234.nip.io
+VPS: задаётся локальным профилем сборки
+Основной канал: Hysteria2 8443/UDP, если provisioned
+Домен/SNI: задаётся локальным профилем; credentials не входят в репозиторий
 ```
 
 ## Лицензия

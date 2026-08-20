@@ -42,6 +42,7 @@ type RouteRuleInfo struct {
 
 // TrafficStats is the realtime counters for the TrafficCard.
 type TrafficStats struct {
+	Available     bool  `json:"available"`     // true only when a real source answered
 	DownloadSpeed int64 `json:"downloadSpeed"` // bytes/sec
 	UploadSpeed   int64 `json:"uploadSpeed"`   // bytes/sec
 	DownloadTotal int64 `json:"downloadTotal"` // bytes this session
@@ -62,11 +63,11 @@ type Metrics struct {
 	startedAt  time.Time
 	lastSample time.Time
 
-	dlTotal int64
-	ulTotal int64
-
-	dlSpeed int64
-	ulSpeed int64
+	dlTotal   int64
+	ulTotal   int64
+	dlSpeed   int64
+	ulSpeed   int64
+	available bool
 
 	// atomic accumulators updated by the dialer wrapper (optional, best-effort)
 	rxAtomic atomic.Int64
@@ -87,6 +88,7 @@ func (m *Metrics) Start() {
 	m.ulTotal = 0
 	m.dlSpeed = 0
 	m.ulSpeed = 0
+	m.available = false
 	m.mu.Unlock()
 
 	// Reset Clash API delta state so first sample doesn't produce a huge spike.
@@ -103,9 +105,10 @@ func (m *Metrics) Stop() {
 
 // sample reads traffic counters from sing-box Clash API and derives rates.
 func (m *Metrics) sample() {
-	rx, tx := readClashTraffic()
+	rx, tx, available := readClashTraffic()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.available = available
 
 	now := time.Now()
 	dt := now.Sub(m.lastSample).Seconds()
@@ -128,6 +131,7 @@ func (m *Metrics) Stats() TrafficStats {
 		uptime = int64(time.Since(m.startedAt).Seconds())
 	}
 	return TrafficStats{
+		Available:     m.available,
 		DownloadSpeed: m.dlSpeed,
 		UploadSpeed:   m.ulSpeed,
 		DownloadTotal: m.dlTotal,
@@ -175,11 +179,15 @@ func ClashConnections() []ClashConnection {
 // at GET /connections (sum of upload/download). We use the simpler /traffic
 // endpoint which returns {up: N, down: N} per-second rates.
 // Returns (rxBytes, txBytes) accumulated since the last call.
-func readClashTraffic() (rxDelta, txDelta int64) {
+func readClashTraffic() (rxDelta, txDelta int64, available bool) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get("http://127.0.0.1:9090/connections")
 	if err != nil {
-		return 0, 0
+		return 0, 0, false
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return 0, 0, false
 	}
 	defer resp.Body.Close()
 	var data struct {
@@ -187,10 +195,11 @@ func readClashTraffic() (rxDelta, txDelta int64) {
 		Download int64 `json:"download"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return 0, 0
+		return 0, 0, false
 	}
 	// /connections returns cumulative totals. We track the delta between calls.
-	return clashTrafficDelta(data.Download, data.Upload)
+	rxDelta, txDelta = clashTrafficDelta(data.Download, data.Upload)
+	return rxDelta, txDelta, true
 }
 
 // clashTrafficState holds the previous cumulative counters to compute deltas.
@@ -263,19 +272,37 @@ func locationFromIP(server string) string {
 func ParseServers(configJSON []byte) []ServerInfo {
 	var raw struct {
 		Outbounds []struct {
-			Type       string `json:"type"`
-			Tag        string `json:"tag"`
-			Server     string `json:"server"`
-			ServerPort int    `json:"server_port"`
+			Type       string   `json:"type"`
+			Tag        string   `json:"tag"`
+			Server     string   `json:"server"`
+			ServerPort int      `json:"server_port"`
+			Candidates []string `json:"outbounds"`
 		} `json:"outbounds"`
 	}
 	if err := json.Unmarshal(configJSON, &raw); err != nil {
 		return nil
 	}
+
+	// A normalized runtime config owns the protected pool through selector
+	// "proxy". Legacy configs without that selector are still parsed for
+	// diagnostics, but a selector config must never expose an unrelated
+	// outbound as a selectable server.
+	selectorCandidates := make(map[string]bool)
+	hasProtectedSelector := false
+	for _, ob := range raw.Outbounds {
+		if ob.Type == "selector" && ob.Tag == "proxy" {
+			hasProtectedSelector = true
+			for _, candidate := range ob.Candidates {
+				selectorCandidates[candidate] = true
+			}
+			break
+		}
+	}
+
 	skip := map[string]bool{"direct": true, "block": true, "urltest": true, "selector": true, "dns": true}
 	var result []ServerInfo
 	for _, ob := range raw.Outbounds {
-		if skip[ob.Type] {
+		if skip[ob.Type] || (hasProtectedSelector && !selectorCandidates[ob.Tag]) {
 			continue
 		}
 		result = append(result, ServerInfo{
@@ -309,44 +336,33 @@ func ResolveOutboundTag(server string, cfg []byte) (string, error) {
 	}
 
 	if strings.EqualFold(server, "auto") {
-		// AdaptiveController owns the protected choice; "auto" therefore maps
-		// to selector proxy after runtime normalization. Keep urltest as a
-		// compatibility fallback only for diagnostic/legacy configs.
+		// "auto" is a policy request, not a sing-box group selection. Manager
+		// normalization leaves the selector default untouched and the caller can
+		// keep the current protected channel.
 		for _, ob := range raw.Outbounds {
-			if ob.Type == "selector" && ob.Tag == "proxy" {
-				return "proxy", nil
-			}
-		}
-		for _, ob := range raw.Outbounds {
-			if ob.Type == "urltest" && ob.Tag == "auto" {
+			if (ob.Type == "selector" && ob.Tag == "proxy") || ob.Type == "urltest" {
 				return "auto", nil
-			}
-		}
-		for _, ob := range raw.Outbounds {
-			if ob.Type == "urltest" {
-				return ob.Tag, nil
 			}
 		}
 		return "", fmt.Errorf("no protected selector or diagnostic urltest in config")
 	}
 
-	code := strings.ToLower(server)
-	// Exact tag match first.
-	for _, ob := range raw.Outbounds {
-		if strings.EqualFold(ob.Tag, code) {
-			return ob.Tag, nil
+	// Resolve only among channels owned by the protected selector. A tag that
+	// happens to exist elsewhere in the JSON must not become selectable if the
+	// route cannot actually reach it.
+	channels := ProtectedChannels(cfg)
+	code := strings.ToLower(strings.TrimSpace(server))
+	for _, channel := range channels {
+		if strings.EqualFold(channel.Tag, code) {
+			return channel.Tag, nil
 		}
 	}
-	// Then contains (country code substring), excluding control outbounds.
-	for _, ob := range raw.Outbounds {
-		if ob.Type == "direct" || ob.Type == "block" || ob.Type == "selector" || ob.Type == "urltest" {
-			continue
-		}
-		if strings.Contains(strings.ToLower(ob.Tag), code) {
-			return ob.Tag, nil
+	for _, channel := range channels {
+		if strings.Contains(strings.ToLower(channel.Tag), code) {
+			return channel.Tag, nil
 		}
 	}
-	return "", fmt.Errorf("no outbound matching %q", server)
+	return "", fmt.Errorf("no protected channel matching %q", server)
 }
 
 // ChannelKeysFromConfig extracts deterministic, secret-free keys for the

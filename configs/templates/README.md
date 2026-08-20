@@ -55,12 +55,12 @@ bash setup.sh
 - `YOUR_UUID` → сгенерировать: `uuidgen`
 - `YOUR_BOT_TOKEN` → токен от BotFather
 - `YOUR_CHAT_ID` → твой Telegram ID
-- `YOUR_DOMAIN` → домен (nip.io работает бесплатно)
+- `YOUR_DOMAIN` → домен (nip.io работает бесплатно), если TLS/SNI реально настроены на VPS
 
 ### 5. Развернуть
-- **ПК:** собрать через `wails build`
-- **Android:** Flutter APK или sing-box из Play Store
-- **iOS:** sing-box / Karing из App Store + конфиг
+- **ПК:** собрать через `wails build`; embedded sing-box не является subprocess.
+- **Android:** Flutter APK + local `config.local.json`; не вставлять credentials в Dart.
+- **iOS:** отдельный Flutter/Network Extension клиент; локальная provisioning.
 - **Лендинг:** Cloudflare Pages (бесплатно)
 
 ## Технология
@@ -68,8 +68,9 @@ bash setup.sh
 | Компонент | Технология |
 |-----------|-----------|
 | VPN ядро | sing-box / sing-box-lx |
-| Протокол | VLESS+TLS (Let's Encrypt) |
-| Транспорт | gRPC + HTTPUpgrade |
+| Основной транспорт | Hysteria2 (QUIC/UDP), если он provisioned в runtime-конфиге |
+| Резерв | Только реально проверенные каналы из selector `proxy` |
+| Политика | AdaptiveController + selector, fail-closed; direct только для явных split-tunnel правил |
 | Анти-ТСПУ | Firefox uTLS fingerprint |
 | ПК приложение | Wails (Go + Vue3) |
 | Android | Flutter + libbox.aar |

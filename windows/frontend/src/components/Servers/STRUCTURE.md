@@ -1,28 +1,21 @@
-# STRUCTURE.md — components/Servers
+# STRUCTURE.md — `components/Servers`
 
-> Управление серверами и маршрутизацией.
+## `ServersCard.vue`
 
-## Файлы
-| Файл | Роль | Wails-вызовы |
-|------|------|--------------|
-| `ServersCard.vue` | Список серверов + выбор (`auto`/`nl`/`fr`) + пинг | `GetServers`, `SelectServer` |
-| `RoutingCard.vue` | Маршрутизация: список правил, вкл/выкл правило | `GetRouteRules`, `ToggleRouteRule` |
+- Polls `GetServers()` every 10 seconds.
+- Renders only actual server outbounds returned by the active config.
+- Derives the selector buttons from that list plus the explicit `auto` policy;
+  no NL/FR hardcoded options are shown when absent.
+- Displays the exact active selector default and TCP ping.
+- Calls `SelectServer(tag)`; Manager rejects a tag outside selector `proxy`.
 
-## Поведение
-### ServersCard
-- `refresh()` поллит `GetServers()` каждые 10 c (показует `active`, `ping`).
-- Пользователь выбирает сервер → `SelectServer(name)` → Go переписывает
-  `route.final` и перезагружает sing-box.
-- `selectedServer` по умолчанию `"auto"`; `switching` блокирует UI на время смены.
-- Использует `inject("showToast")` для уведомлений.
+## `RoutingCard.vue`
 
-### RoutingCard
-- Поллит `GetRouteRules()`; мапит в локальные `Rule` c `ruleIndex` (порядок в `route.rules`).
-- Переключение `ToggleRouteRule(ruleIndex, enabled)` → Go меняет action
-  `direct`↔`outbound:auto` и хот-релоадит.
-- `toggling` — состояние ожидания на конкретном правиле (строке).
+- Polls `GetRouteRules()`.
+- Backend IDs use the original `route.rules` index (`rule-N`). UI service-rule
+  filtering therefore cannot shift a toggle onto `sniff`/`hijack-dns`.
+- Toggle requests go through `ToggleRouteRule(index, enabled)` and Manager
+  normalization maps protected `auto` policy to selector `proxy`.
 
-## Связи
-`App.vue` передаёт в `ServersCard` props `{ configId, connected }`; обе карточки
-самостоятельно ходят в Go через `../../../wailsjs/go/main/App`.
-Тост-уведомления — через `inject("showToast")` (defined в `App.vue`).
+Both cards get Wails methods from generated bindings and use the global toast
+provided by `App.vue`.

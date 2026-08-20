@@ -4,7 +4,6 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/services.dart' show MethodChannel, PlatformException;
 
 void main() {
   runApp(const SnowdenApp());
@@ -54,12 +53,11 @@ class _HomeScreenState extends State<HomeScreen>
   // --dart-define-from-file=android/config.local.json. No server IP, UUID or
   // password belongs in the repository or in the default binary.
   static const String _server = String.fromEnvironment('SNOWDEN_VPS_IP');
-  static const String _uuid = String.fromEnvironment('SNOWDEN_VPS_UUID');
   static const String _password = String.fromEnvironment('SNOWDEN_HY2_PASSWORD');
   static const String _domain = String.fromEnvironment('SNOWDEN_VPN_DOMAIN');
 
   bool get _configReady =>
-      _server.isNotEmpty && _uuid.isNotEmpty && _password.isNotEmpty && _domain.isNotEmpty;
+      _server.isNotEmpty && _password.isNotEmpty && _domain.isNotEmpty;
 
   // Android VPN config — selector-owned TUN route. Protected traffic never
   // falls back to direct; only explicit RU/private rules use direct.
@@ -90,19 +88,8 @@ class _HomeScreenState extends State<HomeScreen>
       {
         "type": "selector",
         "tag": "proxy",
-        "outbounds": ["vless-tls", "hysteria2"],
-        "default": "vless-tls"
-      },
-      {
-        "type": "vless",
-        "tag": "vless-tls",
-        "server": _server,
-        "server_port": 443,
-        "uuid": _uuid,
-        "tls": {
-          "enabled": true,
-          "server_name": _domain
-        }
+        "outbounds": ["hysteria2"],
+        "default": "hysteria2"
       },
       {
         "type": "hysteria2",

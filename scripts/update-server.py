@@ -5,12 +5,16 @@ import json
 import os
 import sys
 
+from env import load_project_env, require_env
+
+load_project_env()
+
 NEW = {
     "type": "hysteria2",
     "tag": "hysteria2-nl",
-    "server": os.environ["SNOWDEN_VPS_IP"],
+    "server": require_env("SNOWDEN_VPS_IP"),
     "server_port": int(os.environ.get("SNOWDEN_HY2_PORT", "8443")),
-    "password": os.environ["SNOWDEN_HY2_PASSWORD"],
+    "password": require_env("SNOWDEN_HY2_PASSWORD"),
     "tls": {
         "enabled": True,
         "server_name": os.environ["SNOWDEN_VPN_DOMAIN"],
@@ -23,7 +27,7 @@ DROPPED = {
 }
 
 paths = [
-    os.environ["SNOWDEN_RUNTIME_CONFIG_PATH"],
+    require_env("SNOWDEN_RUNTIME_CONFIG_PATH"),
     os.environ.get("SNOWDEN_BUILD_CONFIG_PATH"),
     os.environ.get("SNOWDEN_PORTABLE_CONFIG_PATH"),
 ]

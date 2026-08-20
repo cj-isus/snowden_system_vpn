@@ -15,24 +15,31 @@ PowerShell:  python .\deploy.py
 """
 import os, sys, subprocess, json, shutil, re, time
 
+from env import PROJECT_ROOT, load_project_env, require_env
+
+load_project_env()
+
 # ═══════════════════════════════════════════════
-PC_DIR       = r"D:\ОБХОДЫ\unkillable-vpn"
-ANDROID_DIR  = os.environ.get("SNOWDEN_ANDROID_DIR", os.path.join(os.path.dirname(__file__), "..", "android"))
+# All paths are checkout-relative by default. A deployment machine may override
+# them explicitly, but this script never assumes the author's old D:\ОБХОДЫ tree.
+PC_DIR = os.environ.get("SNOWDEN_PC_DIR", str(PROJECT_ROOT / "windows"))
+ANDROID_DIR = os.environ.get("SNOWDEN_ANDROID_DIR", str(PROJECT_ROOT / "android"))
 ANDROID_DIR2 = os.environ.get("SNOWDEN_ANDROID_FALLBACK_DIR", ANDROID_DIR)
-PORTABLE_DIR = r"D:\ОБХОДЫ\Snowden_system\snowden-portable"
-PAGES_DIR    = os.path.join(PC_DIR, "cloudflare", "pages")
-VERSION_FILE = r"D:\ОБХОДЫ\Snowden_system\version.txt"
+PORTABLE_DIR = os.environ.get("SNOWDEN_PORTABLE_DIR", str(PROJECT_ROOT / "build" / "snowden-portable"))
+PAGES_DIR = os.environ.get("SNOWDEN_PAGES_DIR", str(PROJECT_ROOT / "scripts" / "vps-deploy" / "public"))
+VERSION_FILE = os.environ.get("SNOWDEN_VERSION_FILE", str(PROJECT_ROOT / "version.txt"))
+ZIP_PATH = os.environ.get("SNOWDEN_PORTABLE_ZIP", str(PROJECT_ROOT / "build" / "snowden-portable.zip"))
 
-VPS_IP   = os.environ["SNOWDEN_VPS_IP"]
+VPS_IP = require_env("SNOWDEN_VPS_IP")
 VPS_USER = os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
-VPS_PASS = os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
+VPS_PASS = require_env("SNOWDEN_VPS_SSH_PASSWORD")
 
-GO_BIN    = r"C:\Users\Пользо\go-sdk\go\bin"
-WAILS_BIN = r"C:\Users\Пользо\go\bin"
-JAVA_HOME = r"C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot"
-FLUTTER   = os.environ.get("FLUTTER_BIN", "flutter")
-ADB       = os.environ.get("ADB_BIN", "adb")
-TAGS      = "with_awg,with_wireguard,with_utls,with_gvisor"
+GO_BIN = os.environ.get("GO_BIN", "")
+WAILS_BIN = os.environ.get("WAILS_BIN", "")
+JAVA_HOME = os.environ.get("JAVA_HOME", "")
+FLUTTER = os.environ.get("FLUTTER_BIN", "flutter")
+ADB = os.environ.get("ADB_BIN", "adb")
+TAGS = "with_awg,with_wireguard,with_utls,with_gvisor"
 
 # ═══════════════════════════════════════════════
 
@@ -108,16 +115,23 @@ def main():
     print(f"  {'='*46}")
 
     go_env = os.environ.copy()
-    go_env["PATH"] = f"{GO_BIN};{WAILS_BIN};{go_env['PATH']}"
+    tool_paths = [path for path in (GO_BIN, WAILS_BIN) if path]
+    if tool_paths:
+        go_env["PATH"] = ";".join(tool_paths + [go_env["PATH"]])
     go_env["GOPROXY"]    = "https://goproxy.cn,https://proxy.golang.org,direct"
     go_env["GOSUMDB"]    = "off"
     go_env["GOINSECURE"] = "*"
     go_env["GOFLAGS"]    = "-mod=mod"
 
     fl_env = os.environ.copy()
-    fl_env["JAVA_HOME"] = JAVA_HOME
-    fl_env["PATH"] = f"{JAVA_HOME}\\bin;{fl_env['PATH']}"
-    fl_env["ANDROID_SDK_ROOT"] = r"C:\Users\Пользо\Android\Sdk"
+    if JAVA_HOME:
+        fl_env["JAVA_HOME"] = JAVA_HOME
+        fl_env["PATH"] = f"{JAVA_HOME}\\bin;{fl_env['PATH']}"
+    if os.environ.get("ANDROID_SDK_ROOT"):
+        fl_env["ANDROID_SDK_ROOT"] = os.environ["ANDROID_SDK_ROOT"]
+
+    os.makedirs(os.path.join(PORTABLE_DIR, "assets", "configs"), exist_ok=True)
+    os.makedirs(PAGES_DIR, exist_ok=True)
 
     # ═══ 1. ПК ═══
     step(1, "PC build (wails)")
@@ -180,7 +194,8 @@ def main():
         if os.path.exists(p):
             try: os.remove(p)
             except: pass
-    zip_path = r"D:\ОБХОДЫ\Snowden_system\snowden-portable.zip"
+    zip_path = ZIP_PATH
+    os.makedirs(os.path.dirname(zip_path), exist_ok=True)
     if os.path.exists(zip_path): os.remove(zip_path)
     subprocess.run([
         "powershell.exe", "-Command",

@@ -216,6 +216,9 @@ func (m *Manager) ApplyChannel(channelTag string) error {
 	if len(m.activeConfigJSON) == 0 {
 		return errors.New("no active config")
 	}
+	if !m.engine.Running() {
+		return errors.New("engine is not running")
+	}
 	updated, err := ApplyChannel(m.activeConfigJSON, channelTag)
 	if err != nil {
 		return err
@@ -339,11 +342,12 @@ func (m *Manager) PollConnections() {
 		if domain == "" {
 			continue // skip IP-only connections
 		}
-		// Determine outbound from chains (e.g. ["vless-tls"] or ["direct"])
-		outbound := "auto"
-		if len(c.Chains) > 0 {
-			outbound = c.Chains[0]
+		// A connection without a real chain is only a sniff/metadata event;
+		// never attribute it to a fabricated "auto" channel.
+		if len(c.Chains) == 0 || c.Chains[0] == "" {
+			continue
 		}
+		outbound := c.Chains[0]
 		bytes := c.Download + c.Upload
 		m.domainStats.Record(domain, outbound, 0, bytes, true)
 	}

@@ -50,8 +50,8 @@ func TestChannelMemoryBest(t *testing.T) {
 func TestChannelMemorySaveLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "channel-memory.json")
 	m := NewChannelMemory(path)
-	m.Record("vps:hy2:89.125.1.217:8443", true)
-	m.Record("vps:hy2:89.125.1.217:8443", true)
+	m.Record("vps:hy2:test-endpoint:8443", true)
+	m.Record("vps:hy2:test-endpoint:8443", true)
 	if err := m.Save(); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestChannelMemorySaveLoadRoundTrip(t *testing.T) {
 	if err := m2.Load(); err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if m2.Score("vps:hy2:89.125.1.217:8443") <= 0 {
+	if m2.Score("vps:hy2:test-endpoint:8443") <= 0 {
 		t.Fatal("loaded memory lost the recorded channel")
 	}
 }
@@ -100,12 +100,12 @@ func TestChannelMemoryPrune(t *testing.T) {
 // TestChannelKeysFromConfig verifies keys are secret-free and ordered.
 func TestChannelKeysFromConfig(t *testing.T) {
 	cfg := testCfgWith(
-		map[string]string{"type": "hysteria2", "tag": "hysteria2-nl", "server": "89.125.1.217", "server_port": "8443"},
+		map[string]string{"type": "hysteria2", "tag": "hysteria2-nl", "server": "198.51.100.10", "server_port": "8443"},
 		map[string]string{"type": "direct", "tag": "direct"},
 		map[string]string{"type": "block", "tag": "block"},
 	)
 	keys := ChannelKeysFromConfig(cfg)
-	want := ChannelKey(ChannelDescriptor{ID: "hysteria2-nl", Tag: "hysteria2-nl", Type: "hysteria2", Server: "89.125.1.217", Port: 8443})
+	want := ChannelKey(ChannelDescriptor{ID: "hysteria2-nl", Tag: "hysteria2-nl", Type: "hysteria2", Server: "198.51.100.10", Port: 8443})
 	if len(keys) != 1 || keys[0] != want {
 		t.Fatalf("ChannelKeysFromConfig = %v, want [%s]", keys, want)
 	}

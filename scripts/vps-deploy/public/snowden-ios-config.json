@@ -61,12 +61,12 @@
     {
       "type": "vless",
       "tag": "grpc-nl",
-      "server": "192.109.206.234",
+      "server": "YOUR_VPS_IP",
       "server_port": 30843,
-      "uuid": "1e0e52d1-7935-452c-a868-80308e7ab7d2",
+      "uuid": "YOUR_UUID",
       "tls": {
         "enabled": true,
-        "server_name": "snowden-system.192-109-206-234.nip.io",
+        "server_name": "YOUR_VPN_DOMAIN",
         "utls": {
           "enabled": true,
           "fingerprint": "firefox"
@@ -80,12 +80,12 @@
     {
       "type": "vless",
       "tag": "grpc-fr",
-      "server": "78.17.160.83",
+      "server": "YOUR_VPS_FR_IP",
       "server_port": 30843,
-      "uuid": "87fefa00-4227-4bfc-b73a-9599e40e3e93",
+      "uuid": "YOUR_FR_UUID",
       "tls": {
         "enabled": true,
-        "server_name": "snowden2.78-17-160-83.nip.io",
+        "server_name": "YOUR_SECOND_VPN_DOMAIN",
         "utls": {
           "enabled": true,
           "fingerprint": "firefox"
@@ -99,12 +99,12 @@
     {
       "type": "vless",
       "tag": "httpupgrade-nl",
-      "server": "192.109.206.234",
+      "server": "YOUR_VPS_IP",
       "server_port": 20843,
-      "uuid": "1e0e52d1-7935-452c-a868-80308e7ab7d2",
+      "uuid": "YOUR_UUID",
       "tls": {
         "enabled": true,
-        "server_name": "snowden-system.192-109-206-234.nip.io",
+        "server_name": "YOUR_VPN_DOMAIN",
         "utls": {
           "enabled": true,
           "fingerprint": "firefox"
@@ -114,19 +114,19 @@
         "type": "httpupgrade",
         "path": "/snowden",
         "headers": {
-          "Host": "snowden-system.192-109-206-234.nip.io"
+          "Host": "YOUR_VPN_DOMAIN"
         }
       }
     },
     {
       "type": "vless",
       "tag": "httpupgrade-fr",
-      "server": "78.17.160.83",
+      "server": "YOUR_VPS_FR_IP",
       "server_port": 20843,
-      "uuid": "87fefa00-4227-4bfc-b73a-9599e40e3e93",
+      "uuid": "YOUR_FR_UUID",
       "tls": {
         "enabled": true,
-        "server_name": "snowden2.78-17-160-83.nip.io",
+        "server_name": "YOUR_SECOND_VPN_DOMAIN",
         "utls": {
           "enabled": true,
           "fingerprint": "firefox"
@@ -136,19 +136,19 @@
         "type": "httpupgrade",
         "path": "/snowden",
         "headers": {
-          "Host": "snowden2.78-17-160-83.nip.io"
+          "Host": "YOUR_SECOND_VPN_DOMAIN"
         }
       }
     },
     {
       "type": "vless",
       "tag": "vless-nl",
-      "server": "192.109.206.234",
+      "server": "YOUR_VPS_IP",
       "server_port": 443,
-      "uuid": "1e0e52d1-7935-452c-a868-80308e7ab7d2",
+      "uuid": "YOUR_UUID",
       "tls": {
         "enabled": true,
-        "server_name": "snowden-system.192-109-206-234.nip.io",
+        "server_name": "YOUR_VPN_DOMAIN",
         "utls": {
           "enabled": true,
           "fingerprint": "firefox"
@@ -158,12 +158,12 @@
     {
       "type": "vless",
       "tag": "vless-fr",
-      "server": "78.17.160.83",
+      "server": "YOUR_VPS_FR_IP",
       "server_port": 443,
-      "uuid": "87fefa00-4227-4bfc-b73a-9599e40e3e93",
+      "uuid": "YOUR_FR_UUID",
       "tls": {
         "enabled": true,
-        "server_name": "snowden2.78-17-160-83.nip.io",
+        "server_name": "YOUR_SECOND_VPN_DOMAIN",
         "utls": {
           "enabled": true,
           "fingerprint": "firefox"

@@ -1,94 +1,83 @@
 # Архитектура snowden.system
 
-Документ описывает компоненты, их связи и потоки данных. Предназначен и для
-человека, и для ИИ-ассистента как первая точка входа.
+> Карта проекта для человека и ИИ. Фактическая реализация сверяется с кодом,
+> а не с историческими описаниями протоколов.
 
-## 1. Компоненты верхнего уровня
+## 1. Компоненты
 
-| Компонент | Путь | Технологии | Роль |
-|---|---|---|---|
-| Десктоп | `windows/` | Go + Wails v2 + Vue3/TS | Основной клиент: одна кнопка «ВКЛ», адаптивное переключение серверов, дашборд |
-| Core-движок | `windows/backend/core/` | Go (package `core`) | Управление sing-box (subprocess), адаптивный failover, метрики, классификатор ошибок, Circuit Breaker |
-| Конфиг-билдер | `windows/backend/config/` | Go (package `config`) | Сборка sing-box JSON-конфига, подстановка серверов |
-| CF-клиент | `windows/backend/cfclient/` | Go | Клиент к Cloudflare (KV/обновления) |
-| Frontend | `windows/frontend/src/` | Vue3 + TS | UI: дашборд, статус, серверы, логи, трафик |
-| Telegram-бот | `windows/telegram_bot.go` | Go | Админ-панель + раздача файлов пользователям |
-| Мобильное | `android/` | Flutter + Kotlin/VPNService | Клиент для Android/iOS |
-| Конфиги | `configs/` | JSON/conf | Точка истины для всех настроек |
-| Раздача | `configs/cloudflare/` + `scripts/vps-deploy/` | Cloudflare Workers + статик-сервер | Лендинг и файлы обновлений |
+| Компонент | Путь | Роль |
+|---|---|---|
+| Windows facade | `windows/app.go`, `windows/main.go` | Wails API, env, proxy, shutdown, UI events |
+| Embedded core | `windows/backend/core/` | `box.Box`, lifecycle, selector channel model, probes, circuit breaker |
+| Runtime config | `windows/backend/config/` | normalize + fail-closed validation before `box.New` |
+| Frontend | `windows/frontend/src/` | dashboard, dynamic channel list, diagnostics, settings |
+| sing-box source configs | `configs/singbox/` | templates and deployment inputs; runtime copy is under `windows/assets/configs/` |
+| Cloudflare | `configs/cloudflare/` | public metadata, edge health, version and optional telemetry |
+| Mobile | `android/`, `ios/` | separate libbox clients; credentials injected at local build time |
+| Scripts | `scripts/` | explicit operator tools; not part of the VPN runtime |
 
-## 2. Поток данных в десктопе (windows/)
+## 2. Windows data flow
 
-```
-Vue frontend ──wailsjs bindings──► Go app (app.go)
-   ▲                                    │
-   │  EventsOn/EventsOff (webview)      │ Calls
-   │                                    ▼
-   └──── события (logs, traffic, diag) ◄── backend/core (engine, manager, adaptive)
-                                            │  управляет
-                                            ▼
-                                       sing-box.exe (subprocess, Clash API)
-                                            │  поднимает
-                                            ▼
-                                       VPN-туннель + системный прокси
-```
-
-- **Frontend** вызывает методы Go через сгенерированные привязки
-  `frontend/wailsjs/` (не редактировать — генерятся командой `wails generate module`).
-- **`app.go`** — слой приложения: старт/стоп VPN, загрузка конфига
-  (`LoadConfigFile` из `assets/configs/`), проброс событий в UI, Telegram.
-- **`backend/core`** — сердце системы:
-  - `engine.go` — запуск/останов sing-box субпроцесса;
-  - `manager.go` — `StartVPN/StopVPN/ReloadVPN` + состояние;
-  - `adaptive.go` — цикл мониторинга и переключения;
-  - `metrics.go` — EWMA-латентность, потери, success rate;
-  - `classifier.go` — классификация ошибок (server_down, DPI и т.п.);
-  - `domain_stats.go` — статистика по доменам;
-  - `registry.go` — реестр серверов.
-
-## 3. Главные компоненты Vue (компонентная разбивка)
-
-```
-frontend/src/
-├── components/            # @feature/<компонент>/
-│   ├── Dashboard/         # Status, Traffic, Diagnostics, Events, DomainStats, MatrixRain
-│   ├── Servers/           # ServersCard, RoutingCard
-│   ├── Layout/            # Sidebar, TopBar, TerminalBar (+ ui/MatrixRain)
-│   └── Settings/          # SettingsCard
-├── hooks/                 # общие composables (используются фичами)
-├── data/                  # клиенты Wails API, Pinia-хранилища
-└── ui/                    # переиспользуемые базовые UI-компоненты
+```text
+Vue/Wails UI
+    │ Start / Stop / Select / Import
+    ▼
+App facade
+    │ one serialized public boundary
+    ▼
+Manager
+    ├── NormalizeProtectedRoute + Validate
+    ├── Engine: embedded sing-box box.Box
+    ├── Metrics: one cancellable sampler
+    └── AdaptiveEngine: probes + circuit breaker + ChannelMemory
+            │ Apply protected snapshot through Manager.ReloadVPN
+            ▼
+route.final → selector "proxy" → validated protected outbound
+                                            ├── Hysteria2 VPS (if configured)
+                                            ├── other validated channels
+                                            └── block when no protected route is usable
 ```
 
-Правило: **каждый главный компонент — папка** со своими подразделами
-`hooks/` (логика), `data/` (запросы/хранилище), `ui/` (вложенные мелкие
-компоненты), `components/` (подкомпоненты). Вынос логики в `hooks/` делает
-код читаемым и переиспользуемым.
+`direct` is allowed only in explicit route rules such as private/RU traffic. It
+is never a candidate in the protected selector. `urltest` may remain in a
+legacy snapshot for diagnostics, but Manager normalizes the live route so the
+AdaptiveEngine is the only policy owner.
 
-## 4. Конфигурация (configs/)
+## 3. Lifecycle contract
 
-```
-configs/
-├── env/       # токены Telegram и пр. (секреты)
-├── singbox/   # template-vps-reality.json (серверы), template-warp-awg.json (WARP),
-│              # server-params.json, warp-keys.json, ru-cidr.lst (split-tunnel)
-├── cloudflare/ # worker.js (API), r2-worker.js (раздача), wrangler.toml, schema.sql
-├── landing/   # index.html + version.json + отвечающие за скачивание файлы
-└── templates/ # сантья-шаблоны для публикации (платформы)
+```text
+StartVPN → normalize/validate → Engine.Start → running → Adaptive.Start
+ReloadVPN → normalize/validate → Engine.Reload → update snapshots
+StopVPN → Adaptive.Stop → Manager.StopVPN → Engine.Close → clear proxy
 ```
 
-> Приложение читает конфиги из `windows/assets/configs/` — это **рабочие копии**.
-> Редактируй `configs/singbox/`, затем применяй скриптом `configs/sync-to-windows.sh`.
+`Engine.Reload` rebuilds the embedded `box.Box`; there is no sing-box subprocess
+and no assumption that Clash API hot reload is available.
 
-## 5. Раздача (работает в РФ без домена)
+## 4. Config and secrets
 
-- Файлы и лендинг хостятся на **VPS** (`http://<IP>:8090`), см. `scripts/vps-deploy/`.
-- **Telegram-бот** качает файл с VPS (`SNOWDEN_FILE_URL`) и пересылает его в
-  Telegram пользователю — файлы доходят через Telegram, а не с собственного IP.
-- Cloudflare worker — для API статуса и обновлений (не обязателен для РФ-Direct).
+- Edit source templates under `configs/singbox/`, then sync to
+  `windows/assets/configs/` when appropriate.
+- Runtime Start/Reload validates JSON references, placeholders, selector
+  candidates and `route.final`.
+- Public Cloudflare metadata strips credentials. Android/iOS use local
+  `--dart-define-from-file`/equivalent provisioning.
+- `.env`, `config.local.json`, private keys, UUIDs and passwords stay outside
+  commits. `.gitignore` is not a remedy for a secret that was already exposed.
 
-## 6. Известные ограничения
+## 5. Verification entry points
 
-- Clash API на Windows sing-box-lx не работает → счётчик трафика возвращает 0.
-- Reality handshake на lx-форке багованный → используется VLESS+TLS / WARP.
-- APK-сборка Android пока отсутствует (лимит GitHub 100 МБ; собирать локально).
+```powershell
+cd D:\snowden-v2\windows
+& 'C:\Program Files\Go\bin\go.exe' test ./...
+& 'C:\Program Files\Go\bin\go.exe' vet ./...
+& 'C:\Program Files\Go\bin\go.exe' build -tags "with_awg,with_wireguard,with_utls,with_gvisor" ./...
+
+cd D:\snowden-v2\windows\frontend
+npm run build -- --emptyOutDir=false
+
+node --check D:\snowden-v2\configs\cloudflare\worker.js
+```
+
+`go test -race` additionally requires a working C compiler on Windows. Live
+server/protocol checks and Android/iOS acceptance are separate from unit tests.

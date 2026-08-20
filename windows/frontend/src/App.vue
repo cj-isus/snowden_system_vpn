@@ -63,7 +63,7 @@ async function openKaring() {
 // the externally-launched client (both claim the system proxy / TUN).
 async function stopIfRunning() {
   try {
-    if (state.value === "connected" || state.value === "connecting") {
+    if (state.value === "running" || state.value === "starting" || state.value === "stopping") {
       const w = window as any
       await w.go.main.App.StopVPN()
     }
@@ -256,10 +256,10 @@ onUnmounted(() => {
             <div class="about-grid">
               <div class="about-row"><span class="ab-label">Версия</span><span class="ab-val">snowden.system</span></div>
               <div class="about-row"><span class="ab-label">Ядро</span><span class="ab-val">sing-box (embedded)</span></div>
-              <div class="about-row"><span class="ab-label">Протоколы</span><span class="ab-val">VLESS+TLS · gRPC · HTTPUpgrade</span></div>
-              <div class="about-row"><span class="ab-label">Серверы</span><span class="ab-val">NL + FR · авто-failover</span></div>
+              <div class="about-row"><span class="ab-label">Протоколы</span><span class="ab-val">Hysteria2 · selector · fail-closed</span></div>
+              <div class="about-row"><span class="ab-label">Каналы</span><span class="ab-val">из фактического конфига · adaptive recovery</span></div>
               <div class="about-row"><span class="ab-label">Split-tunnel</span><span class="ab-val">RU→direct · заблокированные→VPN</span></div>
-              <div class="about-row"><span class="ab-label">Анти-ТСПУ</span><span class="ab-val">Firefox uTLS · BBR</span></div>
+              <div class="about-row"><span class="ab-label">Диагностика</span><span class="ab-val">probe · circuit breaker · channel memory</span></div>
               <div class="about-row"><span class="ab-label">Telegram бот</span><span class="ab-val">админ-панель + логи</span></div>
             </div>
             <div class="about-footer">

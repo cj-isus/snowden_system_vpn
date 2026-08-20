@@ -7,10 +7,14 @@ import paramiko
 import socket
 import time
 
-HOST = os.environ["SNOWDEN_VPS_IP"]
+from env import load_project_env, require_env
+
+load_project_env()
+
+HOST = require_env("SNOWDEN_VPS_IP")
 PORT = int(os.environ.get("SNOWDEN_VPS_SSH_PORT", "22"))
 USER = os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
-PASS = os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
+PASS = require_env("SNOWDEN_VPS_SSH_PASSWORD")
 
 def run(c, cmd, t=30):
     _, stdout, stderr = c.exec_command(cmd, timeout=t, get_pty=True)
@@ -38,8 +42,8 @@ run(c, "sing-box check -c /etc/sing-box/config.json && echo 'CONFIG OK'")
 print("=== 4. listening ports ===")
 run(c, "ss -tlnp | grep -E ':443|sing-box'")
 
-print("=== 5. config contents (mask key) ===")
-run(c, "sed 's/private_key\": \"[^\"]*/private_key\": \"<HIDDEN>/' /etc/sing-box/config.json")
+print("=== 5. config contents (credential fields masked) ===")
+run(c, "sed -E 's/(\"(private_key|uuid|password|public_key|short_id|secret|i1)\"[[:space:]]*:[[:space:]]*\")([^\"]*)/\\1<REDACTED>/g' /etc/sing-box/config.json")
 
 print("=== 6. sing-box version ===")
 run(c, "sing-box version")

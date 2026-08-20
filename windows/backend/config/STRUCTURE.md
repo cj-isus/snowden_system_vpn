@@ -1,25 +1,42 @@
-# STRUCTURE.md — backend/config
+# STRUCTURE.md — `windows/backend/config`
 
-> Модуль `snowden-system/backend/config`. Пакет: `package config`.
-> ⚠️ КОНФИГ-БИЛДЕР СЕЙЧАС НЕ В ЖИВОМ ПУТИ (legacy): реальный рантайм читает
-> шаблоны напрямую через `app.LoadConfigFile` из `assets/configs/`. См. `PLAN.md` A4.
+Package `config` is the pre-runtime safety boundary. It does not build a VPN
+config from hardcoded country lists; it normalizes and validates JSON supplied by
+templates, import, UI or recovery.
 
-## Назначение (по умолчанию)
-Сборка sing-box JSON-конфига из параметров VPS + опциональный split-tunnel
-по RU-CIDR (rule-set). Описан в `STRUCTURE.md` (корень) как активный компонент,
-но фактически не вызывается живым кодом.
+## Files
 
-## Файлы
-| Файл | Роль | Ключевые типы / функции |
-|------|------|--------------------------|
-| `builder.go` | Сборка конфига и конвертация CIDR-списка в sing-box source rule-set | `VPSConfig`, `BuildConfig(vps, listenPort, ruCIDRPath)`, `EnsureCIDRFile(rawList, dir)`, `splitCSV`, `trim` |
-| — (весь пакет) | — | используется только :  `config.EnsureCIDRFile` из `app.injectSplitTunnel` (которое тоже мёртвое) |
+| File | Role |
+|---|---|
+| `validator.go` | JSON graph checks, placeholder scan, protected selector normalization and default selection |
+| `validator_test.go` | missing references, placeholders, direct fallback and urltest normalization |
+| `builder.go` | legacy `VPSConfig` reference type; not called by the live path |
 
-## Реальность
-- **Живой путь сборки конфига — в `app.go`**: `LoadConfigFile("template-vps-reality.json")`
-  читает файл из `assets/configs/`, возвращает как есть (без подстановки CIDR).
-- **`BuildConfig` / `EnsureCIDRFile` / `injectSplitTunnel`** — мёртвый код по `grep`.
+## Runtime pipeline
 
-## Решение (см. PLAN.md A4, два варианта)
-1. Удалить мёртвые функции из `builder.go` (+ поправить `STRUCTURE.md` корневой).
-2. Либо вернуть под флагом: один rule-set (не 11 тыс. плоских правил) + `split_tunnel_cidr`.
+```text
+raw JSON
+  → NormalizeProtectedRoute
+      legacy urltest/auto → selector proxy
+      direct removed from protected candidates
+      protected route rules → proxy
+  → Validate(RequireFailClosed: true)
+      tags, route, DNS and inbound references
+      no placeholders
+      no direct in protected selector
+      explicit selector default
+  → embedded box.New
+```
+
+Protocol-specific schema validation is still performed by the exact embedded
+sing-box build. This package only validates the generic reference graph and the
+application safety policy.
+
+## Safety invariants
+
+- `route.final` cannot be `direct` in runtime mode.
+- selector `proxy` may contain only validated protected tags and must have a
+  candidate default.
+- explicit `direct` rules remain possible for private/RU split-tunnel policy.
+- public examples may contain placeholders only when validation is called with
+  `AllowPlaceholders: true`; runtime mode never does that.

@@ -42,7 +42,7 @@
 <p>| Ядро | sing-box-lx v1.14.0-lx.2 (embedded) |</p>
 <p>| Протокол | VLESS+TLS (основной), Hysteria2 (резерв) |</p>
 <p>| Сертификат | Let's Encrypt (через nip.io) |</p>
-<p>| VPS | 89.125.1.217 (Нидерланды), BBR, 600 Мбит/с |</p>
+<p>| VPS | YOUR_VPS_IP (Нидерланды), BBR, 600 Мбит/с |</p>
 <p>| Скорость через туннель | ~40 Мбит/с стабильно |</p>
 <hr>
 <h3>2. Технологический стек и обоснование</h3>
@@ -97,8 +97,8 @@ with_gvisor       — userspace TCP/IP stack</code></pre>
 ┌─────────▼─────────────────────────────────────────────────────┐
 │   sing-box-lx (embedded)                                       │
 │   mixed-in(127.0.0.1:20808) → route rules → urltest[auto]     │
-│   VLESS+TLS → VPS (89.125.1.217:443)                       │
-│   Hysteria2 → VPS (89.125.1.217:8443/UDP)                  │
+│   VLESS+TLS → VPS (YOUR_VPS_IP:443)                       │
+│   Hysteria2 → VPS (YOUR_VPS_IP:8443/UDP)                  │
 └───────────────────────────────────────────────────────────────┘</code></pre>
 <h4>Поток трафика</h4>
 <pre><code>Браузер (системный прокси 127.0.0.1:20808)
@@ -240,7 +240,7 @@ InternetSetOption(INTERNET_OPTION_SETTINGS_CHANGED)</code></pre>
 <h4>Параметры</h4>
 <p>| Параметр | Значение |</p>
 <p>|---|---|</p>
-<p>| IP | 89.125.1.217 |</p>
+<p>| IP | YOUR_VPS_IP |</p>
 <p>| ОС | Ubuntu 24.04 LTS |</p>
 <p>| CPU | 1 ядро Xeon Skylake |</p>
 <p>| RAM | 2 GB |</p>

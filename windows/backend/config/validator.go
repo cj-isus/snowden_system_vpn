@@ -118,6 +118,9 @@ func Validate(data []byte, opts ValidationOptions) error {
 				issues = append(issues, fmt.Sprintf("dns.rules[%d].server references missing DNS tag %q", i, server))
 			}
 		}
+		if final, ok := dns["final"].(string); ok && final != "" && final != "local" && final != "fakeip" && !dnsTags[final] {
+			issues = append(issues, fmt.Sprintf("dns.final references missing DNS tag %q", final))
+		}
 	}
 
 	if opts.RequireFailClosed {

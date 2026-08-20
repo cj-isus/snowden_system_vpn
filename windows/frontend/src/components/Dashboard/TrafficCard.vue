@@ -10,6 +10,7 @@ const ulSpeed = ref(0)
 const dlTotal = ref(0)   // bytes
 const ulTotal = ref(0)
 const uptime = ref(0)
+const available = ref(false)
 const chartData = ref<number[]>(Array(30).fill(0))
 
 let timer: number | undefined
@@ -21,14 +22,16 @@ async function poll() {
     state.value = s.state
     if (s.connected) {
       const t = await GetTraffic()
+      available.value = Boolean((t as any).available)
       dlSpeed.value = t.downloadSpeed || 0
       ulSpeed.value = t.uploadSpeed || 0
       dlTotal.value = t.downloadTotal || 0
       ulTotal.value = t.uploadTotal || 0
       uptime.value = t.uptime || 0
-      chartData.value.push(Math.round((t.downloadSpeed || 0) / 1024))
+      chartData.value.push(available.value ? Math.round((t.downloadSpeed || 0) / 1024) : 0)
       if (chartData.value.length > 30) chartData.value.shift()
     } else {
+      available.value = false
       dlSpeed.value = 0
       ulSpeed.value = 0
       chartData.value.push(0)
@@ -38,12 +41,14 @@ async function poll() {
 }
 
 function fmtSpeed(bytesPerSec: number): string {
+  if (!available.value) return "нет данных"
   if (bytesPerSec < 1024) return bytesPerSec.toFixed(0) + " B/s"
   if (bytesPerSec < 1048576) return (bytesPerSec / 1024).toFixed(1) + " KB/s"
   return (bytesPerSec / 1048576).toFixed(2) + " MB/s"
 }
 
 function fmtBytes(b: number): string {
+  if (!available.value) return "нет данных"
   if (b < 1024) return b.toFixed(0) + " B"
   if (b < 1048576) return (b / 1024).toFixed(1) + " KB"
   if (b < 1073741824) return (b / 1048576).toFixed(2) + " MB"
@@ -107,9 +112,12 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
     <div class="traffic-footer">
       <div class="session-info">
         <span class="session-label">СЕССИЯ:</span>
-        <span class="session-val" v-if="connected">↓ {{ fmtBytes(dlTotal) }}</span>
-        <span class="session-val" v-if="connected">↑ {{ fmtBytes(ulTotal) }}</span>
-        <span class="session-val uptime" v-if="connected">{{ fmtUptime(uptime) }}</span>
+        <template v-if="connected && available">
+          <span class="session-val">↓ {{ fmtBytes(dlTotal) }}</span>
+          <span class="session-val">↑ {{ fmtBytes(ulTotal) }}</span>
+          <span class="session-val uptime">{{ fmtUptime(uptime) }}</span>
+        </template>
+        <span class="session-val muted" v-else-if="connected">— нет данных</span>
         <span class="session-val muted" v-else>— отключено</span>
       </div>
     </div>

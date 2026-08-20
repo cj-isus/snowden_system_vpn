@@ -38,7 +38,6 @@ class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   static const _channel = MethodChannel('snowden.system/vpn');
   static const _server = String.fromEnvironment('SNOWDEN_VPS_IP');
-  static const _uuid = String.fromEnvironment('SNOWDEN_VPS_UUID');
   static const _hy2Password = String.fromEnvironment('SNOWDEN_HY2_PASSWORD');
   static const _domain = String.fromEnvironment('SNOWDEN_VPN_DOMAIN');
 
@@ -150,7 +149,7 @@ class _HomeScreenState extends State<HomeScreen>
       "log": {"level": "debug"},
       "dns": {
         "servers": [
-          {"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "auto"},
+          {"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "proxy"},
           {"type": "local", "tag": "local", "detour": "direct"}
         ],
         "rules": [
@@ -166,20 +165,8 @@ class _HomeScreenState extends State<HomeScreen>
         {
           "type": "selector",
           "tag": "proxy",
-          "outbounds": ["vless", "hysteria2"],
-          "default": "vless"
-        },
-        {
-          "type": "vless",
-          "tag": "vless",
-          "server": _server,
-          "server_port": 443,
-          "uuid": _uuid,
-          "tls": {
-            "enabled": true,
-            "server_name": _domain,
-            "alpn": ["h2", "http/1.1"]
-          }
+          "outbounds": ["hysteria2"],
+          "default": "hysteria2"
         },
         {
           "type": "hysteria2",

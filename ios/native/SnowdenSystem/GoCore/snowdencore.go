@@ -1,6 +1,6 @@
 // Package snowdencore exports Go functions callable from Swift via gomobile.
 // This is a full port of the PC backend: Engine, Manager, AdaptiveEngine,
-// CircuitBreaker, ErrorClassifier, split-tunneling, VLESS+Hysteria2+urltest.
+// CircuitBreaker, ErrorClassifier, split-tunneling, selector-owned protected channels.
 //
 // Build: gomobile bind -target ios -o SnowdenCore.xcframework .
 package snowdencore
@@ -876,7 +876,7 @@ func BuildConfig(vps VPSConfig, listenPort uint16, ruCIDRPath string) ([]byte, e
 		"log": map[string]any{"level": "info", "timestamp": true},
 		"dns": map[string]any{
 			"servers": []map[string]any{
-				{"type": "https", "tag": "cloudflare", "server": "1.1.1.1", "path": "/dns-query", "detour": "auto"},
+				{"type": "https", "tag": "cloudflare", "server": "1.1.1.1", "path": "/dns-query", "detour": "direct"},
 				{"type": "local", "tag": "local", "detour": "direct"},
 			},
 			"rules":    []map[string]any{{"outbound": "any", "server": "local"}},
@@ -889,7 +889,7 @@ func BuildConfig(vps VPSConfig, listenPort uint16, ruCIDRPath string) ([]byte, e
 			{
 				"type": "wireguard", "tag": "warp-fallback",
 				"address": []string{"172.16.0.2/32"},
-				"private_key": "OO/FIEWNyFKneQ4fF5l8dLMQ2OJcbVVHtqwNk4A+FVU=",
+				"private_key": "YOUR_WARP_PRIVATE_KEY_BASE64",
 				"peers": []map[string]any{
 					{
 						"address": "162.159.192.1", "port": 4500,

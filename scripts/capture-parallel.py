@@ -1,10 +1,14 @@
 """Capture server logs WHILE the probe is running."""
 import paramiko, threading, time, subprocess, sys, os
 
-HOST=os.environ["SNOWDEN_VPS_IP"]
+from env import load_project_env, require_env
+
+load_project_env()
+
+HOST=require_env("SNOWDEN_VPS_IP")
 PORT=int(os.environ.get("SNOWDEN_VPS_SSH_PORT", "22"))
 USER=os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
-PASS=os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
+PASS=require_env("SNOWDEN_VPS_SSH_PASSWORD")
 logs = []
 
 def tail_logs():

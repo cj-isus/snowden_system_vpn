@@ -1,42 +1,48 @@
-# STRUCTURE.md — android/
+# STRUCTURE.md — `android/`
 
-> Мобильный клиент: Flutter (UI) + нативный Android (VPNService/Kotlin) +
-> sing-box (`libbox`) для туннеля. Цель — переиспользовать ту же sing-box-логику.
+Android is a separate Flutter + Kotlin VPN client. It does not share the Windows
+Go process; it uses the pinned `libbox.aar` runtime through `SnowdenVpnService`.
 
-## Состав
-| Папка/Файл | Роль |
-|-----------|------|
-| `lib/main.dart` | Flutter-UI: экран «ВКЛ/ВЫКЛ», статус, тёмная тема (#3CFF5A) |
-| `android/` | Нативный проект Gradle (Kotlin) |
-| `android/app/src/main/kotlin/com/snowden/system/snowden_android/` | Kotlin-код |
-| `android/app/libs/libbox.aar` | sing-box-библиотека (embedded) |
-| `android/app/build.gradle.kts`, `build.gradle.kts`, `settings.gradle.kts` | Сборка |
-| `test/`, `pubspec.yaml`, `analysis_options.yaml` | Flutter-метаданные |
-| `build_android.bat` | Скрипт сборки APK |
-| `ANDROID_SETUP.md`, `README.md` | Документация |
+## Components
 
-## Ключевой Kotlin (`android/app/src/main/kotlin/.../snowden_android/`)
-| Файл | Роль |
-|------|------|
-| `MainActivity.kt` | Activity + MethodChannel |
-| `SnowdenPlatformInterface.kt` | Мост Flutter ↔ нативный |
-| `SnowdenVpnService.kt` | `VPNService` — поднятие TUN + проброс в sing-box |
+| Path | Role |
+|---|---|
+| `lib/main.dart` | Flutter UI, local build-time config injection and protected TUN JSON |
+| `android/app/src/main/kotlin/.../MainActivity.kt` | Flutter MethodChannel bridge |
+| `.../SnowdenPlatformInterface.kt` | platform bridge and service commands |
+| `.../SnowdenVpnService.kt` | Android VPNService lifecycle and libbox start/stop |
+| `android/app/libs/libbox.aar` | local pinned sing-box Android runtime; do not commit if supplied separately |
+| `config.example.json` | non-secret `--dart-define-from-file` schema |
+| `config.local.json` | ignored local credentials; never publish |
+| `build_android.bat` | checkout-relative build helper with pinned AAR URL |
+| `ANDROID_SETUP.md` | ADB and local acceptance checklist |
 
-## Поток
+## Runtime graph
+
+```text
+Flutter button
+  → MethodChannel("com.snowden.system/vpn")
+  → SnowdenVpnService
+  → libbox TUN
+  → selector "proxy" → provisioned protected Hysteria2 channel
 ```
-Flutter (main.dart) ──MethodChannel("com.snowden.system/vpn")──► MainActivity
-   ▲                                                            └─► SnowdenVpnService (VPNService + libbox)
-   └─► статус/state <──────────────────────────────────────────────┘
-```
-- Конфиг sing-box формируется в `main.dart` (TUN inbound) и передаётся нативу.
 
-## Сборка
-```bash
-cd android
+The Android MVP intentionally uses only a channel whose credentials are present
+in the local profile. A missing profile refuses to start; it does not launch a
+partial config or silently use `direct`. Full adaptive controller and persistent
+ChannelMemory remain a later mobile phase.
+
+## Local build
+
+```powershell
+cd D:\snowden-v2\android
+flutter doctor -v
 flutter pub get
-flutter build apk --release   # или build_android.bat
+flutter build apk --release --dart-define-from-file=config.local.json
+adb devices
+adb install -r .\build\app\outputs\flutter-apk\app-release.apk
 ```
-(см. `configs/README.md` — нужен рабочий sing-box-конфиг или `SNOWDEN_FILE_URL`).
 
-## Статус/ограничения
-- APK-релиз с GitHub ограничен 100 МБ — собирается локально (см. STRUCTURE.md корня).
+The connected device must show `device`, not `unauthorized` or `offline`. Live
+acceptance covers VPN permission, foreground notification, TUN start, protected
+HTTPS traffic and clean stop.

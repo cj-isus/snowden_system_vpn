@@ -1,33 +1,39 @@
-# STRUCTURE.md — configs/singbox/ (конфиги sing-box)
+# STRUCTURE.md — `configs/singbox/`
 
-> Источник истины sing-box-конфигов. Синкается в `windows/assets/configs/`.
-> Реальный путь чтения приложением: `app.LoadConfigFile` → `assets/configs/<name>`.
+This directory is the source of truth for sing-box JSON inputs. The Windows
+runtime reads a synchronized copy under `windows/assets/configs/`; the Manager
+normalizes and validates it before starting embedded sing-box.
 
-## Файлы (рабочие)
-| Файл | Назначение | Примечания (паттерн) |
-|------|-----------|----------------------|
-| `template-vps-reality.json` | **Основной конфиг ПК**: urltest-группа `auto` из 7 VPS-каналов (NL/FR) + split-tunnel | `inbounds`: mixed 127.0.0.1:20808; `route.final=auto` |
-| `template-vps-reality.json.example` | Тот же, с плейсхолдерами `YOUR_*` | публикуется |
-| `template-warp-awg.json` | AmneziaWG (WARP) standalone | endpoint `warp-awg`, `i1` — placeholder; `jc/jmin/jmax/s1..4/h1..4` |
-| `template-reality.json` | Упрощённый Reality-шаблон | legacy/тест |
-| `test-reality-20810.json` | Тестовый конфиг для `enginetest/e2e.go` | порт 20810 |
-| `server-params.json` / `.example` | Параметры личного VLESS VPS | секрет |
-| `server2-params.json` / `warp-keys.json` / `.example` | Доп. параметры / WARP-ключи | секрет |
-| `warp-outbound.json` / `warp2.json` / `warp-amnezia-vpn.conf` | WARP-инструменты/выгрузки | разные форматы |
-| `ru-cidr.lst` | RU CIDR для split-tunnel (11 401 правило) | сейчас не инжектится (см. PLAN A4) |
-| `mieru-credentials.json`, `mieru-fr-credentials.json` | Логин/пароль mieru-сервера | секрет; пока не в движке (см. PLAN B4) |
+## Components
 
-## Ключевой шаблон: `template-vps-reality.json`
-- **DNS**: https `cloudflare` (1.1.1.1, detour auto) + local; `strategy: ipv4_only`.
-- **Inbounds**: `mixed` на `127.0.0.1:20808` (это системный прокси-порт).
-- **Outbounds `auto` (urltest)**: `grpc-nl`, `grpc-fr`, `httpupgrade-nl/fr`,
-  `vless-nl/fr`, `hysteria2-nl`, `direct`, `block`. `url: gstatic/generate_204`,
-  `interval:30s`, `tolerance:50`.
-- **Route rules**: sniff → hijack-dns → `domain_suffix .ru/.su/.рф + банки` = direct
-  (split-tunnel) → youtube/google/tg/discord/ai/social/streaming → `auto` →
-  `ip_is_private`=direct → telegram IP-CIDR → `final: auto`.
+| File | Status |
+|---|---|
+| `template-vps-reality.json` | deployment-specific desktop config; the actual protected candidates are whatever the file contains, commonly Hysteria2/VPS entries |
+| `template-vps-reality.json.example` | public placeholder example; never a release credential source |
+| `template-reality.json` | minimal selector-based Reality example with placeholders |
+| `template-warp-awg.json` | standalone WARP/AmneziaWG experiment; `YOUR_*` and `i1` are placeholders until live validation |
+| `warp-outbound.json`, `warp2.json` | auxiliary WARP formats; not automatically part of Windows failover |
+| `mieru-credentials*.json` | secret material; external client integration only, not native sing-box outbound |
+| `server-params*.json`, `warp-keys*.json` | provisioning inputs; keep local/ignored |
 
-## Важно
-- ⚠️ Правило: source of truth здесь; правки → `bash configs/sync-to-windows.sh`.
-- WARP сейчас НЕ в основном конфиге (отдельный шаблон) — см. PLAN.md B1.
-- `i1` в `template-warp-awg.json` — заглушка под генерацию (см. PLAN.md B3).
+## Target graph
+
+```text
+route.final → selector "proxy" → actual protected outbounds in this file
+                                         ├── Hysteria2/VPS when provisioned
+                                         ├── validated WARP/MASQUE candidate later
+                                         └── never direct
+```
+
+Legacy `urltest`/`route.final: auto` inputs are normalized at runtime. `urltest`
+may remain available for diagnostics, but it is not a second owner of live
+selection. A clean example must not claim that VLESS, FR, AWG or mieru is live
+unless its exact config and binary have been accepted.
+
+## Provisioning rules
+
+- Replace placeholders only in a local ignored config or a controlled release
+  renderer.
+- Keep UUID/password/private key out of public Worker metadata and docs.
+- After changing a source template, sync it deliberately and run the Windows
+  validator/build; do not edit a stale bundled copy by hand.

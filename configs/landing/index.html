@@ -79,50 +79,50 @@
             <div class="card-title">Windows ПК</div>
             <div class="card-subtitle">Дашборд, Circuit Breaker, Telegram-бот</div>
             <div class="card-meta"><span>15 MB</span><span>ZIP</span></div>
-            <a class="btn" href="http://89.125.1.217:8090/snowden-portable.zip" download>⬇ Скачать</a>
+            <a class="btn" href="/files/snowden-portable.zip" download>⬇ Скачать</a>
         </div>
         <div class="card">
             <div class="card-icon">📱</div>
             <div class="card-title">Android</div>
             <div class="card-subtitle">Одна кнопка, Tile в шторке, банки без VPN</div>
             <div class="card-meta"><span>110 MB</span><span>APK</span></div>
-            <a class="btn" href="http://89.125.1.217:8090/snowden-android.apk" download>⬇ Скачать APK</a>
+            <a class="btn" href="/files/snowden-android.apk" download>⬇ Скачать APK</a>
         </div>
         <div class="card">
             <div class="card-icon">🍎</div>
             <div class="card-title">iOS</div>
             <div class="card-subtitle">Конфиг для sing-box или Karing (App Store)</div>
             <div class="card-meta"><span>4 KB</span><span>JSON</span></div>
-            <a class="btn" href="http://89.125.1.217:8090/snowden-ios-config.json" download>⬇ Скачать конфиг</a>
+            <a class="btn" href="/files/snowden-ios-config.json" download>⬇ Скачать конфиг</a>
         </div>
         <div class="card">
             <div class="card-icon">📦</div>
             <div class="card-title">sing-box Android</div>
             <div class="card-subtitle">Конфиг для sing-box из Play Store</div>
             <div class="card-meta"><span>4 KB</span><span>JSON</span></div>
-            <a class="btn" href="http://89.125.1.217:8090/snowden-android-singbox.json" download>⬇ Скачать конфиг</a>
+            <a class="btn" href="/files/snowden-android-singbox.json" download>⬇ Скачать конфиг</a>
         </div>
         <div class="card">
             <div class="card-icon">🛡</div>
             <div class="card-title">Amnezia VPN</div>
             <div class="card-subtitle">WARP (AmneziaWG) — Cloudflare обход</div>
             <div class="card-meta"><span>3 KB</span><span>CONF</span></div>
-            <a class="btn" href="http://89.125.1.217:8090/snowden-amnezia.conf" download>⬇ Скачать конфиг</a>
+            <a class="btn" href="/files/snowden-amnezia.conf" download>⬇ Скачать конфиг</a>
         </div>
     </div>
 
     <div class="features">
         <div class="section-title">// ВОЗМОЖНОСТИ</div>
         <div class="features-grid">
-            <div class="feature">2 сервера: Нидерланды + Франция</div>
-            <div class="feature">gRPC (50+ Мбит/с)</div>
-            <div class="feature">HTTPUpgrade (анти-ТСПУ)</div>
+            <div class="feature">Каналы из фактического runtime-конфига</div>
+            <div class="feature">Hysteria2/QUIC при provisioned сервере</div>
+            <div class="feature">Fail-closed selector policy</div>
             <div class="feature">Firefox uTLS fingerprint</div>
             <div class="feature">Split-tunneling (.ru → напрямую)</div>
             <div class="feature">Банки без VPN (90+ приложений)</div>
             <div class="feature">Circuit Breaker (авто-восстановление)</div>
             <div class="feature">Telegram-бот админ-панель</div>
-            <div class="feature">urltest авто-переключение</div>
+            <div class="feature">AdaptiveController + circuit breaker</div>
             <div class="feature">BBR на обоих серверах</div>
             <div class="feature">Crash handler + авто-очистка прокси</div>
         </div>
@@ -320,8 +320,8 @@
                 <h3>2 сервера с авто-failover</h3>
                 <table>
                     <tr><th>Сервер</th><th>IP</th><th>Локация</th><th>sing-box</th><th>BBR</th></tr>
-                    <tr><td>NL</td><td>89.125.1.217</td><td>Нидерланды</td><td>lx 1.14.0</td><td>✅</td></tr>
-                    <tr><td>FR</td><td>89.125.1.217</td><td>Франция</td><td>1.13.14</td><td>✅</td></tr>
+                    <tr><td>NL</td><td>YOUR_VPS_IP</td><td>Нидерланды</td><td>lx 1.14.0</td><td>✅</td></tr>
+                    <tr><td>FR</td><td>YOUR_VPS_IP</td><td>Франция</td><td>1.13.14</td><td>✅</td></tr>
                 </table>
 
                 <h3>7 outbound'ов в urltest</h3>

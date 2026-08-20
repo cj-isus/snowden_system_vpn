@@ -5,10 +5,14 @@ Check: server can reach internet, sing-box logs for connection attempts.
 import os
 import paramiko, time
 
-HOST=os.environ["SNOWDEN_VPS_IP"]
+from env import load_project_env, require_env
+
+load_project_env()
+
+HOST=require_env("SNOWDEN_VPS_IP")
 PORT=int(os.environ.get("SNOWDEN_VPS_SSH_PORT", "22"))
 USER=os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
-PASS=os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
+PASS=require_env("SNOWDEN_VPS_SSH_PASSWORD")
 
 def run(c,cmd,t=30):
     _,o,e=c.exec_command(cmd,timeout=t,get_pty=True)
@@ -28,8 +32,8 @@ run(c,"curl -sS --max-time 8 http://www.gstatic.com/generate_204 -o /dev/null -w
 print("=== 2. sing-box логи (последние 40 строк) ===")
 run(c,"journalctl -u sing-box -n 40 --no-pager")
 
-print("=== 3. текущий полный конфиг (без маскировки для диагностики) ===")
-run(c,"cat /etc/sing-box/config.json")
+print("=== 3. текущий конфиг (credential fields masked) ===")
+run(c,"sed -E 's/(\"(private_key|uuid|password|public_key|short_id|secret|i1)\"[[:space:]]*:[[:space:]]*\")([^\"]*)/\\1<REDACTED>/g' /etc/sing-box/config.json")
 
 print("=== 4. отключён ли firewall? (или режет ли исходящий) ===")
 run(c,"ufw status verbose")

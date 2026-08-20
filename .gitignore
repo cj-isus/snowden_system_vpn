@@ -60,3 +60,7 @@ windows/assets/configs/
 # ── Локальные данные ────────────────────────────────────────
 docs/assets/
 scripts/server/
+# Local runtime / build artifacts
+__pycache__/
+*.pyc
+.freebuff/

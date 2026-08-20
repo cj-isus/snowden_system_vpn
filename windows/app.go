@@ -10,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"snowden-system/backend/cfclient"
+	runtimeconfig "snowden-system/backend/config"
 	"snowden-system/backend/core"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -26,6 +28,9 @@ type App struct {
 	tray     *trayManager
 	tgLogger *TelegramLogger
 	cfClient *cfclient.Client
+
+	configMu      sync.Mutex
+	pendingConfig []byte // validated import consumed by the next LoadConfigFile call
 }
 
 // loadEnvFile reads .env from the exe directory or working directory and
@@ -118,7 +123,7 @@ func (a *App) startup(ctx context.Context) {
 	}
 
 	// Bridge sing-box logs → frontend "engine:log" event + Telegram logger + domain stats.
-	a.manager.SetLogHandler(logEmitter{ctx: ctx, tgLogger: a.tgLogger, manager: a.manager})
+	a.manager.SetLogHandler(logEmitter{ctx: ctx, tgLogger: a.tgLogger})
 
 	// Wire the adaptive engine events to the frontend.
 	a.adaptive.SetWailsContext(ctx)
@@ -134,13 +139,11 @@ func (a *App) startup(ctx context.Context) {
 	}
 }
 
-// logEmitter forwards sing-box log lines to the frontend via a Wails event,
-// to the Telegram logger for remote monitoring, and extracts domain info for
-// the per-domain stats registry.
+// logEmitter forwards sing-box log lines to the frontend and optional Telegram
+// monitoring. Domain statistics are populated only from real connection samples.
 type logEmitter struct {
 	ctx      context.Context
 	tgLogger *TelegramLogger
-	manager  *core.Manager
 }
 
 func (l logEmitter) OnLog(line string) {
@@ -153,63 +156,9 @@ func (l logEmitter) OnLog(line string) {
 	if l.tgLogger != nil {
 		l.tgLogger.PushLog(line)
 	}
-	// Extract domain from sniffed protocol logs for per-domain stats.
-	// sing-box logs: "sniffed protocol: tls, domain: youtube.com"
-	if l.manager != nil {
-		if domain, ok := extractDomainFromLog(line); ok {
-			outbound := l.manager.ActiveChannel()
-			if outbound == "" {
-				outbound = "unknown"
-			}
-			l.manager.RecordDomainStat(domain, outbound, 0, 0, !containsStr(line, "[error]"))
-		}
-	}
-}
-
-// extractDomainFromLog parses "domain: xxx" from sing-box sniff logs.
-func extractDomainFromLog(line string) (string, bool) {
-	idx := indexOfStr(line, "domain: ")
-	if idx < 0 {
-		return "", false
-	}
-	start := idx + len("domain: ")
-	rest := line[start:]
-	// domain ends at space, quote, or end of line
-	end := len(rest)
-	for i, c := range rest {
-		if c == ' ' || c == '"' || c == ']' || c == ',' {
-			end = i
-			break
-		}
-	}
-	domain := rest[:end]
-	if len(domain) > 3 && domain != "domain:" {
-		return domain, true
-	}
-	return "", false
-}
-
-func containsStr(s, sub string) bool {
-	return len(s) >= len(sub) && indexOfStr(s, sub) >= 0
-}
-
-func indexOfStr(s, sub string) int {
-	if len(sub) == 0 {
-		return 0
-	}
-	for i := 0; i <= len(s)-len(sub); i++ {
-		match := true
-		for j := 0; j < len(sub); j++ {
-			if s[i+j] != sub[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
+	// Sniff logs identify a domain but do not prove request success, latency
+	// or the actual outbound chain. DomainStats is updated only from real
+	// connection samples in Manager.PollConnections.
 }
 
 // ─── Wails-exposed methods (the frontend API) ───
@@ -221,6 +170,12 @@ func (a *App) StartVPN(configID string, configJSON string) error {
 	err := a.manager.StartVPN(configID, []byte(configJSON))
 	if err != nil {
 		log.Printf("[StartVPN] FAILED: %v", err)
+		if a.manager.Status().State != "running" {
+			// A failed start must not leave a stale system proxy pointing at
+			// a listener that was never brought up. Do not clear it when the
+			// request merely reports an already-running engine.
+			_ = clearSystemProxy()
+		}
 		return fmt.Errorf("%w", err)
 	}
 	st := a.manager.Status()
@@ -239,6 +194,9 @@ func (a *App) StartVPN(configID string, configJSON string) error {
 	// Manager owns normalization; give AdaptiveEngine the exact snapshot that
 	// was validated and started, not the caller's legacy urltest JSON.
 	a.adaptive.Start(configID, a.manager.ActiveConfigJSON())
+	a.configMu.Lock()
+	a.pendingConfig = nil
+	a.configMu.Unlock()
 	return nil
 }
 
@@ -387,13 +345,14 @@ func (a *App) SelectServer(server string) error {
 			return fmt.Errorf("protected selector has no selected channel")
 		}
 	}
-	updated, err := core.ApplyChannel(cfg, channelTag)
-	if err != nil {
+	if err := a.manager.ApplyChannel(channelTag); err != nil {
 		return fmt.Errorf("select protected channel %q: %w", channelTag, err)
 	}
 
 	log.Printf("[SelectServer] → %s (channel=%s), reloading selector", server, channelTag)
-	return a.ReloadVPN(a.manager.Status().ConfigID, string(updated))
+	status := a.manager.Status()
+	a.adaptive.UpdateConfig(status.ConfigID, a.manager.ActiveConfigJSON())
+	return nil
 }
 
 // ToggleRouteRule enables/disables a route rule by index and reloads the config.
@@ -474,8 +433,18 @@ func (a *App) ImportConfig(srcPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[ImportConfig] loaded %d bytes from %s", len(data), srcPath)
-	return string(data), nil
+	normalized, err := runtimeconfig.NormalizeProtectedRoute(data)
+	if err != nil {
+		return "", fmt.Errorf("normalize imported config: %w", err)
+	}
+	if err := runtimeconfig.Validate(normalized, runtimeconfig.ValidationOptions{RequireFailClosed: true}); err != nil {
+		return "", err
+	}
+	a.configMu.Lock()
+	a.pendingConfig = append([]byte(nil), normalized...)
+	a.configMu.Unlock()
+	log.Printf("[ImportConfig] validated and staged %d bytes from %s", len(normalized), srcPath)
+	return string(normalized), nil
 }
 
 // ListConfigs returns the names of all config templates in assets/configs/.
@@ -562,6 +531,9 @@ func (a *App) IsAutostartEnabled() bool {
 // LoadConfigFile reads a template config, injects split-tunneling (RU CIDR),
 // and returns the enriched JSON string.
 func (a *App) LoadConfigFile(name string) (string, error) {
+	if name == "" || filepath.Base(name) != name || !strings.HasSuffix(strings.ToLower(name), ".json") {
+		return "", fmt.Errorf("invalid config name %q", name)
+	}
 	candidates := make([]string, 0, 3)
 	if exePath, err := os.Executable(); err == nil {
 		candidates = append(candidates, filepath.Join(filepath.Dir(exePath), "assets", "configs", name))
@@ -570,6 +542,15 @@ func (a *App) LoadConfigFile(name string) (string, error) {
 		candidates = append(candidates, filepath.Join(cwd, "assets", "configs", name))
 	}
 	log.Printf("[LoadConfigFile] looking for %s in %d paths", name, len(candidates))
+
+	a.configMu.Lock()
+	if len(a.pendingConfig) > 0 {
+		raw := append([]byte(nil), a.pendingConfig...)
+		a.configMu.Unlock()
+		log.Printf("[LoadConfigFile] using validated imported snapshot (%d bytes)", len(raw))
+		return string(raw), nil
+	}
+	a.configMu.Unlock()
 
 	var raw []byte
 	for _, p := range candidates {

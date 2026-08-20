@@ -146,10 +146,14 @@ class VPNManager: ObservableObject {
         guard let goCore = goCore else { return "" }
         
         // VPS config (same as PC template-vps-reality.json)
-        let server = "192.109.206.234"
+        guard let server = Bundle.main.object(forInfoDictionaryKey: "SNOWDEN_VPS_IP") as? String,
+              let uuid = Bundle.main.object(forInfoDictionaryKey: "SNOWDEN_VPS_UUID") as? String,
+              let serverName = Bundle.main.object(forInfoDictionaryKey: "SNOWDEN_VPN_DOMAIN") as? String,
+              !server.isEmpty, !uuid.isEmpty, !serverName.isEmpty else {
+            logs.append("[error] iOS provisioning profile is missing VPS credentials")
+            return ""
+        }
         let serverPort = 443
-        let uuid = "1e0e52d1-7935-452c-a868-80308e7ab7d2"
-        let serverName = "snowden-system.192-109-206-234.nip.io"
         let listenPort = 20808
         
         // Generate ru-cidr.json from bundled list
@@ -198,7 +202,7 @@ class VPNManager: ObservableObject {
           "log": {"level": "info", "timestamp": true},
           "dns": {
             "servers": [
-              {"type": "https", "tag": "cloudflare", "server": "1.1.1.1", "path": "/dns-query", "detour": "auto"},
+              {"type": "https", "tag": "cloudflare", "server": "1.1.1.1", "path": "/dns-query", "detour": "direct"},
               {"type": "local", "tag": "local", "detour": "direct"}
             ],
             "rules": [{"outbound": "any", "server": "local"}],
@@ -208,8 +212,8 @@ class VPNManager: ObservableObject {
             {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 20808}
           ],
           "outbounds": [
-            {"type": "urltest", "tag": "auto", "outbounds": ["proxy", "direct"], "url": "https://www.gstatic.com/generate_204", "interval": "1m", "tolerance": 100},
-            {"type": "vless", "tag": "proxy", "server": "192.109.206.234", "server_port": 443, "uuid": "1e0e52d1-7935-452c-a868-80308e7ab7d2", "tls": {"enabled": true, "server_name": "snowden-system.192-109-206-234.nip.io"}},
+            {"type": "selector", "tag": "proxy", "outbounds": ["vless"], "default": "vless"},
+            {"type": "vless", "tag": "vless", "server": "YOUR_VPS_IP", "server_port": 443, "uuid": "YOUR_UUID", "tls": {"enabled": true, "server_name": "YOUR_DOMAIN"}},
             {"type": "direct", "tag": "direct"},
             {"type": "block", "tag": "block"}
           ],
@@ -219,7 +223,7 @@ class VPNManager: ObservableObject {
               {"action": "hijack-dns", "inbound": "mixed-in", "protocol": "dns"},
               {"ip_is_private": true, "action": "direct"}
             ],
-            "final": "auto",
+            "final": "proxy",
             "default_domain_resolver": "local",
             "auto_detect_interface": true
           }

@@ -1,50 +1,85 @@
-# STRUCTURE.md — backend/core (ядро движка)
+# STRUCTURE.md — `windows/backend/core`
 
-> Модуль `snowden-system/backend/core`. Сердце системы: встроенная sing-box,
-> адаптивный failover, метрики, статистика по доменам, реестр протоколов.
-> Для быстрой ориентации LLM/человека. Пакет: `package core`.
+Package `core` owns the Windows VPN runtime around an embedded sing-box-lx
+`box.Box`.
 
-## Назначение
-Управляет sing-box как **встраиваемой библиотекой** (не субпроцессом, см. `engine.go`)
-и предоставляет `Manager` — высокоуровневый фасад, через который Wails-слой
-(`app.go`) стартует/останавливает VPN и читает метрики. Плюс `AdaptiveEngine` —
-цикл мониторинга с Circuit Breaker.
+## Components
 
-## Файлы
-| Файл | Роль | Ключевые типы / функции |
-|------|------|--------------------------|
-| `engine.go` | Встраиваемый sing-box `*box.Box`; сериализация Start/Close/Reload | `Engine`, `EngineState` (Stopped/Starting/Running/Stopping/Error), `Start`, `Close`, `Reload`, `Wait`, `SetLogHandler`, `SetClassifier`, `LogHandler` |
-| `registry.go` | Реестр протоколов sing-box (решает, какие in/outbound зарегистрированы) | `boxContext()`, `inbounds()`, `outbounds()`, `endpoints()`, `dnsTransports()`, `services()`, `certificateProviders()` |
-| `manager.go` | Фасад для UI: жизненный цикл + снимки состояния | `Manager`, `VPNStatus`, `StartVPN`, `StopVPN`, `ReloadVPN`, `Status`, `GetServers`, `GetTraffic`, `GetDomainStats`, `RecordDomainStat`, `PollConnections` |
-| `adaptive.go` | Адаптивный failover: Circuit Breaker + классификатор + пробы | `AdaptiveEngine`, `circuitBreaker`, `TunnelState` (Closed/HalfOpen/Open), `DiagStatus`, `loop`, `deepProbe`, `onCircuitOpen` |
-| `classifier.go` | Классификация ошибок в категории; история событий | `ErrorClassifier`, `ErrorCategory` (NetworkDown/ServerDown/DNS/TLS/Blocked/Whitelist/Degraded/Unknown), `classify()`, `ClassifyProbeError()` |
-| `metrics.go` | Счётчики трафика, парсинг серверов/маршрутов, пинг, экспорт конфига | `Metrics`, `TrafficStats`, `ServerInfo`, `RouteRuleInfo`, `ClashConnection`, `ParseServers`, `ParseRouteRules`, `PingServer`, `ProbeLatencyThroughProxy`, `ExportConfig/ImportConfig` |
-| `domain_stats.go` | Per-domain «память»: лучший outbound для каждого домена | `DomainStatsRegistry`, `DomainMetric`, `DomainScore`, `Record()`, `GetBest()`, `TopDomains()`, `scoreMetric()` |
+| File | Contract |
+|---|---|
+| `engine.go` | serialized `Start`, `Close`, `Reload`, `Wait`; states Stopped/Starting/Running/Stopping/Error; panic and timeout boundaries |
+| `manager.go` | one public lifecycle facade; immutable config snapshots; one metrics worker; active channel state |
+| `adaptive.go` | protected probe loop, classifier, circuit breaker, recovery callback through Manager |
+| `channels.go` | derives protected `ChannelDescriptor` values from selector `proxy`; applies a validated default |
+| `channel_memory.go` | secret-free channel keys, scores, persistence, prune/cap and restart memory |
+| `classifier.go` | operational error categories and rolling log events |
+| `metrics.go` | traffic best-effort sampling, server parsing, route parsing, TCP ping, config I/O |
+| `domain_stats.go` | per-domain observations; informational only until wired to policy |
+| `registry.go` | exact sing-box protocol registrations for the build |
 
-## Потоки данных
+## Ownership rules
+
+```text
+UI / Telegram / AdaptiveEngine
+              │
+              ▼
+          Manager
+              │
+              ▼
+          Engine → embedded box.Box
 ```
-app.go (methods) ──► Manager ──► Engine (embedded sing-box)
-   ▲                 │               │
-   │  Get*()         │  Status()     ▼
-   └─────────────────┴─  sing-box (lox смеш. in 127.0.0.1:20808, Clash API :9090)
-                        ▲
-   AdaptiveEngine.loop ─┤ deepProbe через proxy → правки (Reload / cb)
+
+AdaptiveEngine never calls `Engine.Reload` in production. Recovery calls the
+Manager callback, which updates engine, active config, metrics and then the
+adaptive snapshot consistently.
+
+## Protected channel model
+
+```text
+route.final → selector "proxy" → [only validated protected tags]
+                                            ├── current default
+                                            ├── alternative candidate
+                                            └── no direct fallback
 ```
-- **Вход**: `StartVPN/ReloadVPN(configID, configJSON)` от App.
-- **Логи**: `LogHandler.OnLog` → `app.logEmitter` → UI/Telegram; параллельно `ErrorClassifier.OnLog`.
-- **Метрики**: `Metrics.sample()` из Clash API `/connections`; `PollConnections()` кормит `domain_stats`.
-- **Адаптив**: `AdaptiveEngine.loop` каждые 30 c (`adaptive.go`) → `deepProbe` → при фейлах Circuit Breaker → `onCircuitOpen` (reload).
 
-## Ключевые состояния
-- `EngineState`: Stopped → Starting → Running → Stopping/Error. `Error` разрешает рестарт.
-- `TunnelState` (Circuit Breaker): Closed(здоров) → Open(фейл ×N) → HalfOpen(проба) → Closed.
-  ⚠️ `ShouldProbe`/`EnterHalfOpen` сейчас определены, но не вызываются (см. `PLAN.md` A1).
+`ChannelKey` hashes endpoint identity and does not persist IP, UUID, password or
+private key in the memory file. `ChannelMemory` is a preference/history signal,
+not proof that a channel is currently live; every selected candidate still needs
+a protected probe.
 
-## Известные ограничения / нюансы
-- sing-box не умеет hot-reload (`Reload` = Close+Start) — `engine.go` держит мьютекс на весь своп, состояние не публикуется как Stopped.
-- Clash API на Windows sing-box-lx отдаёт трафик, но счётчик может быть 0 при недоступности `:9090`.
-- `registry.go` намеренно не регистрирует `protocol/naive` (тянет cronet, не качается через RU-прокси).
+## Circuit breaker
 
-## Тесты
-- `enginetest/e2e.go` (пакет `main`, вне этой папки) — ручной e2e-прогон движка.
-- Юнит-тестов `*_test.go` пока нет (см. PLAN: добавить для circuitBreaker/metrics).
+```text
+Closed --2 consecutive probe failures--> Open
+Open --10/20/40/60s cooldown--> HalfOpen
+HalfOpen --2 successes--> Closed
+HalfOpen --1 failure--> Open
+```
+
+Closed probes run on a bounded cadence. Recovery is fail-closed: if no validated
+protected candidate works, the route is not changed to `direct`.
+
+## Metrics limitation
+
+The embedded runtime does not automatically expose the Clash API. `Metrics` and
+`PollConnections` therefore return real data only when the exact build/config
+provides the endpoint; otherwise zero/empty values mean unavailable, not fake
+traffic. This must remain visible in UI/docs rather than being presented as a
+successful measurement.
+
+## Tests
+
+- `engine_test.go`, `engine_ext_test.go`: lifecycle and waiter contracts.
+- `manager_test.go`: single metrics worker and stop safety.
+- `adaptive_test.go`: circuit transitions and backoff.
+- `channel_memory_test.go`, `channels` coverage: persistence and selection.
+- `validator` tests live in `backend/config` because validation is a separate
+  package boundary.
+
+Run from `windows/`:
+
+```text
+go test ./...
+go vet ./...
+go test -race ./...   # requires CGO/C compiler on Windows
+```

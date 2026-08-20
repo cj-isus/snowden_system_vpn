@@ -4,10 +4,14 @@ Verify that the configured VPS address is the server's public endpoint.
 import os
 import paramiko
 
-HOST=os.environ["SNOWDEN_VPS_IP"]
+from env import load_project_env, require_env
+
+load_project_env()
+
+HOST=require_env("SNOWDEN_VPS_IP")
 PORT=int(os.environ.get("SNOWDEN_VPS_SSH_PORT", "22"))
 USER=os.environ.get("SNOWDEN_VPS_SSH_USER", "root")
-PASS=os.environ["SNOWDEN_VPS_SSH_PASSWORD"]
+PASS=require_env("SNOWDEN_VPS_SSH_PASSWORD")
 CURL_HOST = f"[{HOST}]" if ":" in HOST and not HOST.startswith("[") else HOST
 
 c=paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())

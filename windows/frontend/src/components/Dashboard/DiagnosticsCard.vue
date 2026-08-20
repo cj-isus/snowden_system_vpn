@@ -1,16 +1,23 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted, computed } from "vue"
-import { Diagnostics, GetLatency } from "../../../wailsjs/go/main/App"
+import { Diagnostics, GetLatency, GetServers } from "../../../wailsjs/go/main/App"
 
 const diag = ref<any>({})
+const activeServer = ref<any>(null)
 const expanded = ref(false)
 const latency = ref<number>(-1)
 
 let timer: number | undefined
 async function poll() {
   try {
-    diag.value = await Diagnostics()
-    latency.value = await GetLatency()
+    const [nextDiag, nextLatency, servers] = await Promise.all([
+      Diagnostics(),
+      GetLatency(),
+      GetServers(),
+    ])
+    diag.value = nextDiag
+    latency.value = nextLatency
+    activeServer.value = (servers || []).find(server => server.active) || null
   } catch {}
 }
 
@@ -26,25 +33,29 @@ interface CheckItem {
 
 const checks = computed((): CheckItem[] => {
   const d = diag.value
+  const hasDiag = Boolean(d?.state)
   const isHealthy = d?.state === "HEALTHY"
   const cat = d?.category || ""
   const lat = latency.value
   const latStr = lat >= 0 ? lat + "ms" : "—"
+  const serverTarget = activeServer.value
+    ? `${activeServer.value.server}:${activeServer.value.port}`
+    : "активный protected channel"
   return [
-    { label: "Локальный интернет", target: "8.8.8.8", ok: cat !== "network_down", lat: "ok" },
-    { label: "VPS сервер", target: "VPS:443", ok: cat !== "server_down", lat: "ok" },
-    { label: "Туннель", target: "generate_204", ok: isHealthy, lat: latStr },
-    { label: "DNS", target: "1.1.1.1", ok: cat !== "dns_failure", lat: "ok" },
-    { label: "TLS handshake", target: "", ok: cat !== "tls_failure", lat: cat !== "tls_failure" ? "OK" : "FAIL" }
+    { label: "Локальная сеть", target: "direct signal", ok: hasDiag && cat !== "network_down", lat: hasDiag ? "ok" : "—" },
+    { label: "VPS сервер", target: serverTarget, ok: hasDiag && cat !== "server_down", lat: hasDiag ? "ok" : "—" },
+    { label: "Туннель", target: "protected probe", ok: isHealthy, lat: latStr },
+    { label: "DNS", target: "protected resolver", ok: hasDiag && cat !== "dns_failure", lat: hasDiag ? "ok" : "—" },
+    { label: "TLS handshake", target: activeServer.value?.protocol || "active channel", ok: hasDiag && cat !== "tls_failure", lat: hasDiag && cat !== "tls_failure" ? "OK" : "—" }
   ]
 })
 
 const detailInfo = computed(() => {
   const d = diag.value
   return {
-    server: "VPS Netherlands",
-    protocol: "VLESS+TLS",
-    activeSessions: "—",
+    server: activeServer.value?.name || "не выбран",
+    protocol: activeServer.value?.protocol || "—",
+    activeSessions: "недоступно без Clash API",
     reconnects: d?.failCount || 0,
     reason: d?.lastError ? (d.lastError as string).substring(0, 60) : (d?.explanation || "—")
   }

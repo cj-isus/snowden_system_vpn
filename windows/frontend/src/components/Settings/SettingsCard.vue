@@ -51,7 +51,7 @@ async function doImport() {
     if (!path) return
     const json = await ImportConfig(String(path))
     if (json) {
-      showToast?.(`Конфиг импортирован (${json.length} байт). Запустите VPN заново.`, 'success')
+      showToast?.(`Конфиг проверен и подготовлен (${json.length} байт). Следующий запуск использует его.`, 'success')
     }
   } catch (e: any) {
     showToast?.('Ошибка импорта: ' + (e?.message || e), 'error')

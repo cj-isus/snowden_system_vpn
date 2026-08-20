@@ -93,6 +93,7 @@ export namespace core {
 	    }
 	}
 	export class TrafficStats {
+	    available: boolean;
 	    downloadSpeed: number;
 	    uploadSpeed: number;
 	    downloadTotal: number;
@@ -105,6 +106,7 @@ export namespace core {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.available = source["available"];
 	        this.downloadSpeed = source["downloadSpeed"];
 	        this.uploadSpeed = source["uploadSpeed"];
 	        this.downloadTotal = source["downloadTotal"];

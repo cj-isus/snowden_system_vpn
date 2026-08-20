@@ -103,6 +103,20 @@ func TestValidateRejectsDirectProtectedSelector(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsMissingDNSFinalReference(t *testing.T) {
+	cfg := mustJSON(map[string]any{
+		"dns": map[string]any{
+			"servers": []any{map[string]any{"tag": "local", "type": "local"}},
+			"final":   "missing-dns",
+		},
+		"outbounds": []any{map[string]any{"type": "hysteria2", "tag": "vps", "server": "198.51.100.10", "server_port": 8443}},
+		"route":     map[string]any{"final": "vps"},
+	})
+	if err := Validate(cfg, ValidationOptions{}); err == nil || !strings.Contains(err.Error(), "dns.final") {
+		t.Fatalf("expected missing DNS final error, got %v", err)
+	}
+}
+
 func TestValidateAllowsExplicitDirectRoute(t *testing.T) {
 	cfg := mustJSON(map[string]any{
 		"outbounds": []any{

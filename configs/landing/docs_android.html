@@ -55,8 +55,8 @@
 │  · final → auto (urltest: VLESS + Hysteria2)                   │
 │       │                                                        │
 │       ▼                                                        │
-│  VLESS+TLS (89.125.1.217:443) — основной канал              │
-│  Hysteria2 (89.125.1.217:8443/UDP) — резерв (UDP режется)   │
+│  VLESS+TLS (YOUR_VPS_IP:443) — основной канал              │
+│  Hysteria2 (YOUR_VPS_IP:8443/UDP) — резерв (UDP режется)   │
 └────────────────────────────────────────────────────────────────┘</code></pre>
 <hr>
 <h3>2. Стек технологий и почему именно он</h3>
@@ -113,7 +113,7 @@ Libbox.setup(setupOpts)</code></pre>
 }</code></pre>
 <p>Затем при вызове <code>startDefaultInterfaceMonitor(listener)</code> сразу уведомляем sing-box:</p>
 <pre><code>listener.updateDefaultInterface(defaultInterfaceName, 0, false, true)</code></pre>
-<p><strong>Почему это работает:</strong> После уведомления sing-box начинает вызывать <code>autoDetectInterfaceControl(fd)</code> для каждого outbound-сокета → наш <code>protect()</code> срабатывает → сокет к VPS (89.125.1.217:443) уходит через физический интерфейс, а не через TUN → петля разорвана → интернет работает.</p>
+<p><strong>Почему это работает:</strong> После уведомления sing-box начинает вызывать <code>autoDetectInterfaceControl(fd)</code> для каждого outbound-сокета → наш <code>protect()</code> срабатывает → сокет к VPS (YOUR_VPS_IP:443) уходит через физический интерфейс, а не через TUN → петля разорвана → интернет работает.</p>
 <hr>
 <h4>3.5. Почему `addDisallowedApplication` для собственного приложения</h4>
 <pre><code>builder.addDisallowedApplication(&quot;com.snowden.system.snowden_android&quot;)</code></pre>
@@ -215,15 +215,15 @@ service.tunFd = pfd  // в openTun()</code></pre>
     },
     {
       &quot;type&quot;: &quot;vless&quot;, &quot;tag&quot;: &quot;vless&quot;,
-      &quot;server&quot;: &quot;89.125.1.217&quot;, &quot;server_port&quot;: 443,
+      &quot;server&quot;: &quot;YOUR_VPS_IP&quot;, &quot;server_port&quot;: 443,
       &quot;uuid&quot;: &quot;***&quot;,
-      &quot;tls&quot;: {&quot;enabled&quot;: true, &quot;server_name&quot;: &quot;snowden-system.192-109-206-234.nip.io&quot;}
+      &quot;tls&quot;: {&quot;enabled&quot;: true, &quot;server_name&quot;: &quot;YOUR_VPN_DOMAIN&quot;}
     },
     {
       &quot;type&quot;: &quot;hysteria2&quot;, &quot;tag&quot;: &quot;hysteria2&quot;,
-      &quot;server&quot;: &quot;89.125.1.217&quot;, &quot;server_port&quot;: 8443,
+      &quot;server&quot;: &quot;YOUR_VPS_IP&quot;, &quot;server_port&quot;: 8443,
       &quot;password&quot;: &quot;***&quot;,
-      &quot;tls&quot;: {&quot;enabled&quot;: true, &quot;server_name&quot;: &quot;snowden-system.192-109-206-234.nip.io&quot;}
+      &quot;tls&quot;: {&quot;enabled&quot;: true, &quot;server_name&quot;: &quot;YOUR_VPN_DOMAIN&quot;}
     },
     {&quot;type&quot;: &quot;direct&quot;, &quot;tag&quot;: &quot;direct&quot;},
     {&quot;type&quot;: &quot;block&quot;, &quot;tag&quot;: &quot;block&quot;}
@@ -321,7 +321,7 @@ SnowdenVpnService.onStartCommand:
          │
          ├─ [Трафик приложения попадает в TUN]
          │
-         ├─ sing-box создаёт outbound-сокет к VPS (89.125.1.217:443)
+         ├─ sing-box создаёт outbound-сокет к VPS (YOUR_VPS_IP:443)
          │   └─ PlatformInterface.autoDetectInterfaceControl(fd)
          │       └─ service.protect(fd)      ← сокет не уйдёт в TUN
          │
@@ -548,10 +548,10 @@ for (pkg in bankPackages) {
 <p>urltest автоматически выбирает VLESS (TCP).</p>
 <hr>
 <h3>17. Учётные данные сервера</h3>
-<pre><code>VPS: 89.125.1.217 (Нидерланды)
+<pre><code>VPS: YOUR_VPS_IP (Нидерланды)
 VLESS:    порт 443/TCP,  TLS (Let&#x27;s Encrypt), BBR
 Hysteria2: порт 8443/UDP, TLS (режется мобильными операторами)
-Домен:    snowden-system.192-109-206-234.nip.io (wildcard DNS nip.io)
+Домен:    YOUR_VPN_DOMAIN (wildcard DNS nip.io)
 CPU:      1 ядро Xeon Skylake, 2GB RAM
 Скорость: ~600 Мбит/с (VPS→Cloudflare), ~40 Мбит/с (через туннель)</code></pre>
 <hr>
