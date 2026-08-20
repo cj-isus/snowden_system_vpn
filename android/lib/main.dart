@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -234,7 +233,7 @@ class _HomeScreenState extends State<HomeScreen>
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
-                      border: Border.all(color: _statusColor.withOpacity(0.3)),
+                      border: Border.all(color: _statusColor.withValues(alpha: 0.3)),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Row(
@@ -280,7 +279,7 @@ class _HomeScreenState extends State<HomeScreen>
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(18),
                         border: Border.all(
-                          color: const Color(0xFF3CFF5A).withOpacity(0.2),
+                          color: const Color(0xFF3CFF5A).withValues(alpha: 0.2),
                         ),
                       ),
                       child: const Icon(
@@ -335,7 +334,7 @@ class _HomeScreenState extends State<HomeScreen>
                                   ? [
                                       BoxShadow(
                                         color: const Color(0xFF3CFF5A)
-                                            .withOpacity(0.15 * pulse),
+                                            .withValues(alpha: 0.15 * pulse),
                                         blurRadius: 40 * pulse,
                                         spreadRadius: 2,
                                       )
@@ -393,7 +392,7 @@ class _HomeScreenState extends State<HomeScreen>
                     color: const Color(0xFF101010),
                     borderRadius: BorderRadius.circular(14),
                     border: Border.all(
-                      color: const Color(0xFF3CFF5A).withOpacity(0.08),
+                      color: const Color(0xFF3CFF5A).withValues(alpha: 0.08),
                     ),
                   ),
                   child: const Row(
