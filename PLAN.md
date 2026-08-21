@@ -1,6 +1,6 @@
 # План snowden.system v2 — проверенная реализация адаптивной системы
 
-> Версия плана: 2026-08-20.
+> Версия плана: 2026-08-21.
 >
 > Этот документ заменяет прежний план и отделяет проверенные факты от проектных
 > решений. Цель — не «добавить ещё протоколов», а получить управляемую систему:
@@ -48,37 +48,97 @@
 
 ### 0.3. Состояние рабочей копии на момент создания плана
 
-Ветка `master`. Уже существовали незакоммиченные изменения в:
+На 2026-08-21 в ветке `master` остаётся большой незакоммиченный функциональный
+набор изменений. Он затрагивает Windows lifecycle/adaptive core, channel
+manifest, Android `VpnService`/TUN/probe/status bridge, Flutter profile/runtime,
+тесты и сопутствующую документацию. Эти изменения принадлежат текущей рабочей
+сессии и не должны смешиваться с будущими коммитами без повторной проверки.
+
+`AUDIT.md` и этот `PLAN.md` фиксируют состояние и очередь отдельно от кода.
+При последующем коммите документации нельзя считать весь функциональный diff
+принятым: для него отдельно нужны `go test -race`, `go vet`, сборки Flutter/
+Kotlin и live-проверки.
+
+### 0.4. Локально подтверждённое состояние окружения
+
+Согласно последнему аудиту:
+
+- `windows/frontend`: `npm ci` и `npm run build` проходят;
+- Windows Go core: `go test`, `go test -race`, `go vet` и build с рабочими tags
+  проходили при запуске Go по абсолютному пути;
+- Android: `flutter analyze`, `flutter test` (20 тестов), Kotlin release compile,
+  release APK и установка через ADB проходили;
+- на PTP N49 / Android 16 подтверждены TUN, physical underlay, повторный
+  start/stop и fail-closed cleanup;
+- успешный внешний HTTPS через текущий HY2 не подтверждён;
+- Wails CLI и интерактивный Windows GUI live-run ещё не приняты;
+- `npm audit fix` автоматически не запускать: advisory требует отдельного
+  решения и может изменить lockfile/toolchain.
+
+### 0.5. Актуальный срез и очередь на 2026-08-21
+
+Этот блок — рабочая очередь, а не новая архитектура. Подробные факты и ссылки
+на файлы находятся в `AUDIT.md`; при расхождении с более старым текстом ниже
+приоритет имеет свежий audit.
+
+#### Уже сделано и подтверждено
+
+- Windows embedded engine, Manager lifecycle, metrics worker, Adaptive
+  circuit breaker и recovery через Manager собраны в единый fail-closed контур.
+- ChannelMemory, classifier, DomainStats и parser/config-validator tests уже
+  покрывают основные headless-сценарии.
+- UI больше не выдаёт fake active server и fake traffic: отсутствующие метрики
+  показываются как «нет данных».
+- Android переведён на актуальный `libbox` API: lifecycle проходит через
+  `startForeground` → `Libbox.setup` → command server → `startOrReloadService`.
+- Android TUN реально поднимается на тестовом устройстве; внешний probe идёт
+  после старта и при отказе закрывает VPN без direct fallback.
+- Channel manifest и metadata-aware resolution уже добавлены в рабочее дерево;
+  их ещё нужно подтвердить тестами, синхронизацией runtime-конфига и UI.
+
+#### Открытые блокеры
+
+1. **P0 — серверный транспорт:** DNS `kopilot.com` не указывает на ожидаемый
+   VPS, TLS/SNI не принят, а HY2 UDP/QUIC handshake не подтверждён.
+2. **P0 — protected HTTPS:** пока не доказан полный путь DNS → HTTPS через TUN
+   на реальном профиле.
+3. **P0 — failover:** нет второго validated protected channel и live-теста
+   переключения без direct leak.
+4. **P1 — TrafficCard:** pinned sing-box не регистрирует Clash API, поэтому
+   реальные counters пока недоступны.
+5. **P1 — release acceptance:** свежая Wails-сборка и интерактивный Windows
+   Start/Stop/Reload ещё не проверены.
+
+#### Ближайший порядок работ
 
 ```text
-windows/app.go
-windows/backend/config/builder.go
-windows/backend/core/adaptive.go
-windows/backend/core/engine.go
-windows/backend/core/manager.go
-windows/backend/core/metrics.go
+1. Повторно проверить текущий функциональный diff на чистых командах.
+2. Пока ждём доступ к серверу, закрыть локальные задачи:
+   manifest/config tests, validator после route toggles, фильтрацию
+   protected samples в DomainStats, build-tag/TrafficSource проверку.
+3. После исправления VPS принять реальный protected HTTPS на Android.
+4. Добавить второй независимый канал и принять live failover.
+5. Включить/проверить Clash API или реализовать честный TrafficSource.
+6. Собрать и вручную принять свежий Wails desktop build.
+7. Только после Windows MVP переносить стабильный channel contract на iOS.
 ```
 
-и новые файлы тестов/памяти в `windows/backend/core/`, а также `.freebuff/`.
-Эти изменения нельзя считать проверенными до запуска Go-тестов и race detector.
-План не разрешает удалять или откатывать их без отдельного анализа diff.
+#### Что целесообразно делать без серверной поддержки
 
-### 0.4. Локальная проверка окружения после создания плана
+- не добавлять новые протоколы «на глаз», а дописать тесты на disabled/unknown
+  manifest entries, selector resolution и сохранение fail-closed policy;
+- прогнать `ToggleRouteRule` через тот же validator, чтобы UI не мог обойти
+  проверку конфигурации;
+- ограничить `DomainStats` только samples от validated protected outbounds;
+- проверить `with_clash_api` на точной embedded-сборке и оставить UI в состоянии
+  «нет данных», если источник не зарегистрирован;
+- довести Wails build/release checklist и документацию provisioning, не добавляя
+  реальные credentials в репозиторий;
+- подготовить детерминированный сценарий live acceptance, который после выдачи
+  доступа к VPS сводится к повторяемому набору команд и проверок.
 
-Проверено пользователем на Windows:
-
-- `windows/frontend`: `npm ci` успешно установил зависимости;
-- `npm run build` успешно собрал Vue frontend и `frontend/dist`;
-- ADB-смартфон сначала был `unauthorized`, затем успешно перешёл в статус `device`;
-- Go отсутствует в PATH, поэтому Go tests/build пока не запускались;
-- Flutter отсутствует в PATH, поэтому Android build пока не запускался;
-- правильный Android-путь проекта: `D:\\snowden-v2\\android`;
-- ожидаемый AAR-путь в этом checkout: `android/android/app/libs/libbox.aar`;
-- старый `build_android.bat` содержит устаревший абсолютный путь и требует исправления.
-
-Не запускать `npm audit fix` автоматически: в отчёте есть 2 high vulnerabilities,
-но автоматическое обновление может изменить lockfile и версии toolchain. Сначала
-зафиксировать воспроизводимую сборку, затем отдельно разобрать advisory.
+Сознательно отложены до закрытия этих блокеров: mieru-адаптер, новые AWG/I1
+профили, zapret/byedpi, полноценный Windows TUN/service mode и iOS-перенос.
 
 ---
 

@@ -1,11 +1,117 @@
 # AUDIT — что написано и что реально работает
 
-> Проверено 2026-08-20 в `D:\snowden-v2` (HEAD = `34e2968`).
-> Только статический аудит + проходящие тесты, **без запуска**
-> Wails-приложения (exe от 2026-07-09 в Roaming не интерактивный).
+> Проверено 2026-08-20 в `D:\snowden-v2` (рабочее дерево; базовый audit был начат на `8f46f06`).
+> Выполнены статический аудит, локальные тесты/сборки и live ADB-smoke на
+> разблокированном PTP N49 / Android 16. Wails-приложение отдельно не
+> запускалось: exe от 2026-07-09 в Roaming не интерактивен.
 > Все факты о текущем коде взяты из реальных файлов + `git grep` +
-> `go test ./...` + `flutter test`/`flutter analyze`/`flutter build apk`.
+> `go test ./...` + `flutter test`/`flutter analyze`/`flutter build apk` +
+> `adb logcat`/`dumpsys`.
 > Каждый блок начинается с маркера состояния и ссылки на файл/строку.
+>
+> **Follow-up note:** разделы ниже с исходным Phase 1/Phase 2 описанием Android
+> были написаны до текущего lifecycle-порта. Актуальный результат проверки и
+> все исправления в этом working tree находятся в разделе «Follow-up audit»;
+> при расхождении он имеет приоритет.
+
+## Follow-up audit — Android lifecycle/profile (2026-08-20)
+
+### Реально прогнанные проверки
+
+```text
+✅ flutter analyze                         No issues found
+✅ flutter test                            20 tests passed
+✅ android/gradlew :app:compileReleaseKotlin --no-daemon
+   BUILD SUCCESSFUL
+✅ flutter build apk --release --dart-define-from-file=config.local.json
+   Built app-release.apk (232.3 MB)
+✅ adb install -r app-release.apk          Success on PTP N49 / Android 16
+✅ placeholder build + ADB tap             no native dispatch; UI kept the
+                                            explicit config.local.json error
+```
+
+Для native error-path была собрана **временная debug APK только с dummy
+values** (`203.0.113.10`, `test-password`, `example.com`; эти значения не
+являются секретами). На реально запущенном Android service лог показал:
+
+1. Первый lifecycle-дефект: `MainActivity` ставила `STARTING` до доставки
+   intent, а `SnowdenVpnService` считывал этот общий state как «уже запущен».
+   В результате `startForeground()` не вызывался и Android завершал FGS с
+   `ForegroundServiceDidNotStartInTimeException`. Исправлено: service guard
+   теперь смотрит на собственные `CommandServer/isRunning`, а не на shared
+   dispatch state.
+2. Второй профильный дефект: AAR отверг legacy `inet4_address`/
+   `inet6_address`; после их замены на `tun.address[]` AAR дошёл до следующей
+   миграционной проверки и отверг legacy `inbound.sniff`. Исправлено: sniff
+   оставлен только как route action `{"action":"sniff"}`.
+3. Ошибка libbox теперь идёт через единый `failVpn`: native resources
+   закрываются, `ERROR` не затирается `onDestroy` в `STOPPED`, а `closeService`
+   не вызывается до фактического успешного `startOrReloadService`.
+
+Pure profile tests закрепляют отсутствие старых полей и protected
+`route.final == "proxy"`; native Kotlin compile подтверждает границу AAR.
+
+После этого выполнен новый live-smoke на разблокированном устройстве с
+временным dummy-профилем (`203.0.113.10`, `test-password`, `example.com`):
+
+- `SnowdenPlatformInterface` перечислил физические интерфейсы
+  `rmnet_data0`, `rmnet_data2`, `rmnet_data3`, `wlan2`;
+- libbox принял default interface `rmnet_data2`, TUN был создан;
+- в логах подтверждены `TUN established`, `sing-box started` и
+  `VPN started; TUN established`;
+- повторный start после stop также прошёл, без `no available network
+  interface`, native crash или `ForegroundServiceDidNotStartInTimeException`;
+- Stop прошёл через cleanup, `SnowdenVpnService` исчез из `dumpsys`.
+
+Во время этого smoke был обнаружен отдельный дефект: вызов
+`Libbox.newStandaloneCommandClient()`/`urlTestOutbound()` внутри стартовой
+транзакции приводил к необрабатываемому SIGSEGV в Go runtime после запуска
+TUN. Startup probe удалён: старт отвечает только за инициализацию libbox и
+TUN, а внешний HTTPS-тест теперь выполняется отдельным безопасным Java
+компонентом после поднятия TUN. Хост-пакет больше не исключается из VPN:
+обычный probe-сокет действительно проходит через `tun-in`, а native sockets
+libbox по-прежнему вызывают `VpnService.protect(fd)`.
+
+### Реальный локальный профиль и live-результат
+
+Локальный `android/config.local.json` создан из трёх непустых значений
+(`SNOWDEN_VPS_IP`, `SNOWDEN_HY2_PASSWORD`, `SNOWDEN_VPN_DOMAIN`), находится под
+`.gitignore`; значения и хэши секретов в этот документ не попадают. Release
+APK собрана именно с этим локальным профилем.
+
+На PTP N49 / Android 16 выполнены две независимые проверки:
+
+1. **Release, DNS через protected proxy:** `TUN established` → `VPN started;
+   TUN established` → два DNS-запроса `www.gstatic.com` без ответа →
+   `protected HTTPS probe failed: dns_failed` → единый `failVpn` → сервис
+   отсутствует в `dumpsys`.
+2. **Временный debug-only DNS bootstrap через local resolver:** DNS
+   `www.gstatic.com` разрешился, но HTTPS-запрос через `hysteria2` завершился
+   `timeout`; после этого probe также закрыл TUN. Это отделяет DNS bootstrap
+   от самого защищённого канала.
+
+Следовательно, Android lifecycle, TUN, physical underlay, DNS routing и
+fail-closed cleanup подтверждены. Для присланного endpoint дополнительно
+проверено:
+
+- `kopilot.com A` сейчас возвращает `66.96.149.22`, а не VPS `89.125.1.217`;
+  AAAA-записи нет;
+- TLS на `66.96.149.22` отдаёт просроченный сертификат `*.bizland.com`, не
+  соответствующий `kopilot.com`;
+- TLS-запросы к `89.125.1.217` с SNI `kopilot.com` сбрасываются;
+- TCP connect к портам `80/443/20843/30843/8090/8443` проходит, но это не
+  доказывает наличие sing-box; HTTP/TLS на них зависает или сбрасывается;
+- минимальный UDP-пакет на `89.125.1.217:8443` ответа не получил. Это не
+  полноценный HY2 handshake, поэтому окончательный verdict по UDP требует
+  проверки server logs или рабочего клиента после исправления DNS.
+
+Успешный внешний HTTPS через текущий HY2 профиль не подтверждён. Первый
+обязательный фикс — DNS `kopilot.com → 89.125.1.217`, затем действующий TLS
+сертификат для `kopilot.com` и разрешённый UDP/QUIC `8443` в UFW/cloud security
+group. Если мобильный оператор режет QUIC, нужен проверенный TCP VLESS на
+`443`/`30843` и UUID; текущий Android-профиль содержит только HY2-реквизиты.
+Для проверки `systemctl`, `sing-box check`, `ss`, firewall и journal нужен
+read-only SSH-доступ к VPS; HY2-пароль для этого не подходит.
 
 ## TL;DR
 
@@ -22,9 +128,9 @@
 | Windows frontend ↔ backend wiring | 🟢 green | `TrafficCard` корректно показывает «нет данных» если `available=false`; `RoutingCard` фильтрует `rule-\d+` и парсит `ruleIndex`; MasterApp.vue реагирует на `running/starting/stopping` а не `connected/connecting` |
 | Windows **build tags совпадают с wails.json** | 🟢 green | `"with_awg,with_wireguard,with_utls,with_gvisor"` (`windows/wails.json:9`) |
 | Android Kotlin-обёртки под **новый** `libbox v1.14.0-lx.3` API | 🟢 green | `flutter build apk --release` → 232 МБ fat APK, install/sideload/start/PID verify |
-| Android Flutter UI, analyze | 🟢 green | `flutter analyze` No issues, `flutter test` 1/1 passed |
+| Android Flutter UI, analyze | 🟢 green | `flutter analyze` No issues, `flutter test` 20/20 passed, profile/runtime/diagnostics/log/probe contracts separated into pure components |
 | **Clash API source для TrafficCard** | 🟡 **НЕ работает** | pinned sing-box build не регистрирует Clash API в `registry.go`; `Metrics.readClashTraffic` стучится в `127.0.0.1:9090`, реально возвращает 0 B/s; UI честно показывает «нет данных» |
-| **Android VPN реально поднимает TUN** | 🟡 **Phase 2** | `commandServer.startOrReloadService(configJson, OverrideOptions)` сейчас **не вызывается** — кнопка «ПОДКЛЮЧИТЬ» вызывает только `startVpn`, но `startVpn` ставит только `Libbox.setup + newCommandServer.start`. UI рендерится правильно, AccessibilityTree UID'ы показывают 16 элементов, но TUN не активируется (Требуется CommandClient → serviceReload с JSON-конфигом) |
+| **Android VPN реально поднимает TUN** | 🟢 **lifecycle + fail-closed** | На разблокированном PTP N49 подтверждены физические интерфейсы, `TUN established`, `VPN started; TUN established`, probe через `tun-in` и отсутствие service после отказа. Успешный внешний HTTPS текущего HY2 не подтверждён |
 | **Live VPS failover тест** | 🟡 **Не проверен** | в `assets/configs/template-vps-reality.json.example` placeholder'ы; реальный файл-конфиг не зафиксирован; обрыв первого канала симулировать не получилось без live VPS |
 | **TLS-MITM** (Касперский/CryptoPro CSP) | 🟢 обход работает | `org.gradle.jvmargs=-Dhttps.protocols=TLSv1.2,TLSv1.3` + `lint{ checkReleaseBuilds=false }` — пройдены через все артефакты |
 
@@ -39,8 +145,8 @@
 ✅ go build -tags "with_awg,with_wireguard,with_utls,with_gvisor" ./...
    (no output, binary built in GOPATH cache)
 ✅ flutter analyze                  No issues found! (10.8s)
-✅ flutter test                     All tests passed! (1/1)
-✅ flutter build apk --release      √ Built app-release.apk (231.1 MB)
+✅ flutter test                     All tests passed! (20/20 Android pure tests)
+✅ flutter build apk --release      √ Built app-release.apk (232.3 MB)
 ✅ adb install -r app-release.apk   Success   (PTP N49 / Android 16 API 36)
 ✅ adb shell pidof ...              14555    (alive)
 ✅ adb shell am start ...MainActivity  Starting: Intent { ... }
@@ -106,14 +212,27 @@
 - `where wails` — не найден. Старый exe 09.07.2025 в Roaming.
 - **План**: `go install github.com/wailsapp/wails/v2/cmd/wails@latest`; затем `wails build -tags "with_awg,with_wireguard,with_utls,with_gvisor"` и локальный запуск в твоём GUI.
 
-### 4.4. ⚠️ **Открыть «ПОДКЛЮЧИТЬ» в Android UI не поднимает TUN**
-- `android/.../SnowdenVpnService.kt:135-178` — реализует всю правильную последовательность `Libbox.setup(SetupOptions) → newCommandServer(handler, platform) → commandServer.start()`.
-- Но `commandServer.startOrReloadService(configJson, OverrideOptions)` **не вызывается** автоматически. По новому AAR это единственный прямой путь поднять VPN; альтернатива — CommandClient протокол (TCP сокет), который пока не запущен.
-- **План**: реализовать `SnowdenCommandClient.kt` — на стороне SnowdenVpnService подключиться к собственному listener на 127.0.0.1:commandServerListenPort с commandServerSecret и отправить `serviceReload` с `configJson`. **Phase 2.**
+### 4.4. ✅ **Android lifecycle now dispatches the direct native start path**
+- `android/.../MainActivity.kt` validates config, handles VPN consent, and
+  marks `STARTING` only as an asynchronous dispatch state.
+- `android/.../SnowdenVpnService.kt` calls `startForeground` → `Libbox.setup`
+  → `newCommandServer` → `server.start()` →
+  `server.startOrReloadService(configJson, OverrideOptions)`.
+- The live dummy-profile run reached real libbox start, enumerated physical
+  underlay interfaces, established TUN, and completed a repeated start/stop
+  cycle. The live local profile reaches the same TUN boundary, then the
+  protected Java probe fails closed because the current HY2 path gives no
+  HTTPS response.
+- A startup `newStandaloneCommandClient().urlTestOutbound()` probe was removed
+  after it reproducibly caused an uncaught native SIGSEGV on the pinned AAR;
+  external connectivity is now a separate acceptance step, not part of the
+  lifecycle transaction. Native `writeDebugMessage` logs now flow into a
+  bounded 200-line in-memory `getLogs()` snapshot without opening that client.
 
-### 4.5. ⚠️ **VPN config placeholders — никогда не был живой**
-- `windows/assets/configs/template-vps-reality.json.example` — содержит `YOUR_*` placeholders. Реальный production config не в репо, не в backup'ах машины.
-- **План**: либо попросить тебя положить реальный `template-vps-reality.json` (с приватными креденшелами) и не коммитить, либо использовать mocking endpoint с local DNS resolver.
+### 4.5. 🟡 **VPS transport acceptance ещё не закрыта**
+- Публичный `windows/assets/configs/template-vps-reality.json.example` по-прежнему содержит `YOUR_*` placeholders и не является release-источником.
+- Android получил отдельный локальный ignored-профиль с непустыми HY2-реквизитами; это не означает, что серверный handshake успешно принят.
+- На мобильной сети live probe получил `dns_failed` при protected DoH и `timeout` при debug local DNS bootstrap. Нужен доступный HY2 UDP/QUIC либо отдельный подтверждённый TCP-канал.
 
 ## 5. Чеклист готовности к Phase 2 (реальный TUN)
 
@@ -122,17 +241,18 @@
 1. ✅ Kotlin компилируется → ✓ done.
 2. ✅ APK устанавливается → ✓ done (`pm list packages`).
 3. ✅ MainActivity стартует → ✓ done (`am start`).
-4. ❌ Кнопка «ПОДКЛЮЧИТЬ» запускает TUN → **открыто**; требует CommandClient + `serviceReload(configJson)`.
-5. ❌ Реальный external HTTP request через TUN работает → **открыто**; нужно проверить через curl/whatsmyip после (4).
+4. ✅ Кнопка «ПОДКЛЮЧИТЬ» → dummy TUN smoke пройден: `TUN established` и `VPN started; TUN established`; повторный start/stop также пройден.
+5. 🟡 Реальный protected HTTPS request через TUN → путь доказан, но текущий HY2 не вернул ответ; acceptance остаётся открытым до исправления серверного/сетевого канала.
 6. ❌ Live failover между двумя VPS → **открыто**; это Phase 3.
 
 ## 6. Roadmap Phase 2 → 7 в порядке «сначала видимое»
 
 | # | Шаг | Что получишь | Что нужно |
 |---|---|---|---|
-| 1 | `SnowdenCommandClient.kt` + serviceReload | Кнопка «ПОДКЛЮЧИТЬ» реально поднимает TUN | AAR libbox API + TCP-сокет внутри VpnService |
-| 2 | `MethodChannel` `status/diag` из Kotlin в Flutter | UI видит `running/starting/error` от libbox-стейта | Двухсторонний bridge |
-| 3 | End2end: через TUN выходит HTTP-запрос на `gstatic.com/generate_204` | Видим, что трафик идёт через VPN | CMD `adb shell curl ...` через наш forward |
+| 1 | Post-fix ADB start → TUN → stop | Закрыть lifecycle acceptance gap | ✅ TUN и fail-closed cleanup на локальном профиле |
+| 2 | `MethodChannel` `status/diag` из Kotlin в Flutter | UI видит lifecycle, TUN, underlay, default interface и bounded logs |✅ typed status/diag/log/probe bridge + 20 pure Flutter tests; full CommandClient control ещё отдельно
+ |
+| 3 | End2end: Java probe через TUN → `gstatic.com/generate_204` | Видим DNS/HTTPS и не принимаем direct fallback | Код и fail-closed готовы; текущий HY2 даёт `timeout`, нужен рабочий канал |
 | 4 | Live VPS failover: добавить `vps-reality-2.json.example` | Adaptive переключается на 2-й VPS | Реальный 2-й VPS, `chooseRecoveryConfig` уже подключён |
 | 5 | Включить `with_clash_api` в `wails.json` | TrafficCard начнёт показывать реальный трафик | Перекомпилировать; проверить что `registry.go` готов |
 | 6 | Country mapping через metadata в config | Убрать substring hack | JSON-метаданные + `CountryFromMetadata` |
@@ -170,6 +290,11 @@ cd android
 
 ---
 
-> **TL;DR**: ~110 Go-тестов зелёные, Flutter analyze чисто, APK ставится и стартует.
-> **Реальные блокеры для живого Android-VPN TUN**: только Phase 2 — реализация `SnowdenCommandClient` чтобы `commandServer.startOrReloadService` был вызван. Это один файл + один IPC.
+> **TL;DR**: ~110 Go-тестов зелёные, Flutter analyze чисто, Android pure
+> contracts 20/20, Kotlin compile и release APK зелёные. Локальный ignored
+> профиль непустой и собран в release APK. На разблокированном телефоне
+> подтверждены TUN, physical underlay, protected-path probe через `tun-in` и
+> fail-closed cleanup: при текущем HY2 `dns_failed`/`timeout` сервис исчезает.
+> Успешный внешний HTTPS пока не заявляется зелёным — нужен доступный HY2
+> UDP/QUIC или проверенный TCP-канал.
 > **Реальный blocker для TrafficCard**: добавить `with_clash_api` build tag или написать свой TrafficSource (Phase 5.2).
