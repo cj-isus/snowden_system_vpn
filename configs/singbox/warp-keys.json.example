@@ -1,8 +1,0 @@
-{
-  "_comment": "WARP AmneziaWG keys — copy to warp-keys.json and fill in your values",
-  "private_key": "YOUR-PRIVATE-KEY",
-  "device_id": "YOUR-DEVICE-ID",
-  "client_id": "nbid",
-  "peer_public": "YOUR-PEER-PUBLIC-KEY",
-  "endpoint_v4": "162.159.192.7:0"
-}
