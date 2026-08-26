@@ -1,789 +1,1147 @@
-# План snowden.system v2 — проверенная реализация адаптивной системы
+# snowden.system — строгий план построения с нуля
 
-> Версия плана: 2026-08-21.
+> Версия: 2026-08-26.
 >
-> Этот документ заменяет прежний план и отделяет проверенные факты от проектных
-> решений. Цель — не «добавить ещё протоколов», а получить управляемую систему:
-> обнаружить проблему → выбрать рабочий канал → применить → проверить → запомнить.
+> Документ является master-plan для greenfield-разработки. Он описывает не
+> обещание «обхода любых блокировок», а систему с максимально высокой
+> практической устойчивостью против заранее измеренных классов отказа.
 >
-> Эталонный контур реализации на первом этапе — **Windows: Go + Wails + embedded
-> sing-box-lx**. Android и iOS подключаются после стабилизации контракта канала.
+> **Критическое правило:** никакая схема не даёт 100% гарантии. Оператор может
+> блокировать IP/ASN, домен, SNI, TLS fingerprint, CDN, протокол, приложение,
+> все внешние маршруты или канал доставки конфигурации. Мы гарантируем только
+> поведение системы: она выбирает исключительно подтверждённый канал и при его
+> отказе не выпускает protected traffic напрямую.
 
 ---
 
-## 0. Статус проверки
+## 0. Управление знаниями проекта и журнал разработки
 
-### 0.1. Что проверено
+`PLAN.md` — **единственный главный источник правды для намерений, требований,
+решений, текущего статуса и истории разработки**. После сжатия контекста,
+перезапуска сессии или передачи задачи другой модели первым обязательным шагом
+является повторное чтение этого файла; нельзя продолжать работу по памяти,
+старым сообщениям или предположениям.
 
-- Windows использует embedded `box.Box`, а не subprocess sing-box.
-- Живой путь конфигурации: `app.LoadConfigFile` → `windows/assets/configs/`.
-- `windows/backend/config/builder.go` — legacy и не участвует в рабочем пути.
-- В текущей незакоммиченной ветке уже есть попытки исправить lifecycle, circuit
-  breaker, metrics loop, outbound tag resolution и добавить `ChannelMemory`.
-- В основной рабочей конфигурации фактически нельзя автоматически считать все
-  документированные каналы существующими: runtime-конфиг и публичный `.example`
-  расходятся. Реальные каналы определяются только фактическим конфигом.
-- Основной проверенный транспорт — Hysteria2 VPS. Наличие рабочих VLESS/FR/AWG
-  каналов требует отдельного live-теста.
-- `DomainStatsRegistry.GetBest()` реализован, но не подключён к выбору маршрута.
-- Windows использует mixed inbound + системный HTTP proxy, а не полноценный TUN
-  для всего трафика.
+### 0.1. Обязательный дневник
 
-### 0.2. Проверенные исправления против старых документов
+В этом же файле ведётся append-only журнал. В него записывается всё, что
+страшно потерять:
 
-1. `experimental.cache_file` sing-box хранит fake IP/DNS-кэш, но не является
-   памятью выбора `urltest`.
-2. `store_selected` относится к старому Clash API и Selector; на текущем
-   `urltest` без Clash API рассчитывать на него нельзя.
-3. В sing-box/sing-box-lx текущей ветки нет native `mieru` outbound.
-4. AWG-поля присутствуют в исходнике lx, но рабочая AWG-сборка проекта не
-   доказана: main module использует `sagernet/wireguard-go v0.0.3`, а runtime
-   совместимость с obfuscation должна быть проверена отдельно.
-5. Clash API на `127.0.0.1:9090` нельзя считать работающим: основной конфиг его
-   не включает, а текущие Wails build tags не включают `with_clash_api`.
-6. Cloudflare Worker был синтаксически невалиден при `node --check`; его нельзя
-   считать готовым production-сенсором.
-7. `go 1.25.0` валиден: Go 1.25 выпущен в августе 2025. Понижать версию из-за
-   старой документации не требуется.
+- что выполнено и чем проверено;
+- какой результат получен без проблем;
+- встреченная трудность или дефект;
+- блокер, его причина, владелец и влияние;
+- принятое решение и отвергнутые альтернативы;
+- изученный готовый аналог и решение: адаптировать/скопировать идею,
+  улучшить или отказаться;
+- незавершённый следующий шаг и точный критерий закрытия.
 
-### 0.3. Состояние рабочей копии на момент создания плана
+Каждая запись содержит дату, статус (`done`, `partial`, `blocked`, `decision`),
+затронутый компонент, доказательство и следующий шаг. Секреты, credentials,
+сырые приватные логи и чувствительные endpoint details в дневник не заносятся.
+Нельзя переписывать историю так, чтобы исчезли прежние трудности; исправление
+делается новой записью с ссылкой на предыдущую.
 
-На 2026-08-21 в ветке `master` остаётся большой незакоммиченный функциональный
-набор изменений. Он затрагивает Windows lifecycle/adaptive core, channel
-manifest, Android `VpnService`/TUN/probe/status bridge, Flutter profile/runtime,
-тесты и сопутствующую документацию. Эти изменения принадлежат текущей рабочей
-сессии и не должны смешиваться с будущими коммитами без повторной проверки.
+### 0.2. Правило работы после восстановления контекста
 
-`AUDIT.md` и этот `PLAN.md` фиксируют состояние и очередь отдельно от кода.
-При последующем коммите документации нельзя считать весь функциональный diff
-принятым: для него отдельно нужны `go test -race`, `go vet`, сборки Flutter/
-Kotlin и live-проверки.
+Перед любой правкой после context compression необходимо:
 
-### 0.4. Локально подтверждённое состояние окружения
+1. прочитать `PLAN.md` полностью или релевантный раздел и последний дневник;
+2. проверить `git status --short --branch`;
+3. сверить заявленный статус с кодом, тестами и live-evidence;
+4. только затем планировать и выполнять изменения.
 
-Согласно последнему аудиту:
+Если важный факт не записан в `PLAN.md`, он считается потерянным для следующей
+сессии и должен быть добавлен до продолжения.
 
-- `windows/frontend`: `npm ci` и `npm run build` проходят;
-- Windows Go core: `go test`, `go test -race`, `go vet` и build с рабочими tags
-  проходили при запуске Go по абсолютному пути;
-- Android: `flutter analyze`, `flutter test` (20 тестов), Kotlin release compile,
-  release APK и установка через ADB проходили;
-- на PTP N49 / Android 16 подтверждены TUN, physical underlay, повторный
-  start/stop и fail-closed cleanup;
-- успешный внешний HTTPS через текущий HY2 не подтверждён;
-- Wails CLI и интерактивный Windows GUI live-run ещё не приняты;
-- `npm audit fix` автоматически не запускать: advisory требует отдельного
-  решения и может изменить lockfile/toolchain.
+### 0.3. Reuse-first и исследование аналогов
 
-### 0.5. Актуальный срез и очередь на 2026-08-21
+Мы не выдумываем код там, где существует зрелое открытое решение. До новой
+реализации обязательно:
 
-Этот блок — рабочая очередь, а не новая архитектура. Подробные факты и ссылки
-на файлы находятся в `AUDIT.md`; при расхождении с более старым текстом ниже
-приоритет имеет свежий audit.
+1. найти 2–3 релевантных аналога;
+2. изучить исходный код, документацию, issue/ограничения и лицензию;
+3. определить, существует ли готовый компонент, который можно безопасно
+   адаптировать;
+4. сравнить его с текущим стеком и threat model;
+5. записать в дневник решение: адаптированно скопировать паттерн, использовать
+   зависимость, сделать собственную реализацию лучше или отказаться, с причиной;
+6. только после этого писать код.
 
-#### Уже сделано и подтверждено
+«Похожее название» или tutorial не считается исследованным аналогом. Копируем
+только совместимый по лицензии и безопасности код, сохраняем attribution и
+фиксируем upstream revision. Не переносим credentials, telemetry, небезопасные
+fallbacks или неподтверждённые claims.
 
-- Windows embedded engine, Manager lifecycle, metrics worker, Adaptive
-  circuit breaker и recovery через Manager собраны в единый fail-closed контур.
-- ChannelMemory, classifier, DomainStats и parser/config-validator tests уже
-  покрывают основные headless-сценарии.
-- UI больше не выдаёт fake active server и fake traffic: отсутствующие метрики
-  показываются как «нет данных».
-- Android переведён на актуальный `libbox` API: lifecycle проходит через
-  `startForeground` → `Libbox.setup` → command server → `startOrReloadService`.
-- Android TUN реально поднимается на тестовом устройстве; внешний probe идёт
-  после старта и при отказе закрывает VPN без direct fallback.
-- Channel manifest и metadata-aware resolution уже добавлены в рабочее дерево;
-  их ещё нужно подтвердить тестами, синхронизацией runtime-конфига и UI.
+### 0.4. Компонентность и производительность
 
-#### Открытые блокеры
-
-1. **P0 — серверный транспорт:** DNS `kopilot.com` не указывает на ожидаемый
-   VPS, TLS/SNI не принят, а HY2 UDP/QUIC handshake не подтверждён.
-2. **P0 — protected HTTPS:** пока не доказан полный путь DNS → HTTPS через TUN
-   на реальном профиле.
-3. **P0 — failover:** нет второго validated protected channel и live-теста
-   переключения без direct leak.
-4. **P1 — TrafficCard:** pinned sing-box не регистрирует Clash API, поэтому
-   реальные counters пока недоступны.
-5. **P1 — release acceptance:** свежая Wails-сборка и интерактивный Windows
-   Start/Stop/Reload ещё не проверены.
-
-#### Ближайший порядок работ
+Код проектируется по bounded-компонентам с одной ответственностью:
 
 ```text
-1. Повторно проверить текущий функциональный diff на чистых командах.
-2. Пока ждём доступ к серверу, закрыть локальные задачи:
-   manifest/config tests, validator после route toggles, фильтрацию
-   protected samples в DomainStats, build-tag/TrafficSource проверку.
-3. После исправления VPS принять реальный protected HTTPS на Android.
-4. Добавить второй независимый канал и принять live failover.
-5. Включить/проверить Clash API или реализовать честный TrafficSource.
-6. Собрать и вручную принять свежий Wails desktop build.
-7. Только после Windows MVP переносить стабильный channel contract на iOS.
+UI → typed facade → application service → domain policy → adapter → platform/engine
 ```
 
-#### Что целесообразно делать без серверной поддержки
+Требования: явные ownership/lifecycle, bounded queues, cancellation, timeout,
+backpressure, отсутствие лишних копирований, неизменяемые snapshots, lazy
+initialization, кэширование только с доказанной пользой, профилирование перед
+оптимизацией и отсутствие premature micro-optimizations. Каждая оптимизация
+должна иметь benchmark/profile до и после, не ухудшать безопасность и не
+ломать fail-closed. Производительность измеряется отдельно для startup,
+probe, steady-state throughput, memory, CPU и reconnect.
 
-- не добавлять новые протоколы «на глаз», а дописать тесты на disabled/unknown
-  manifest entries, selector resolution и сохранение fail-closed policy;
-- прогнать `ToggleRouteRule` через тот же validator, чтобы UI не мог обойти
-  проверку конфигурации;
-- ограничить `DomainStats` только samples от validated protected outbounds;
-- проверить `with_clash_api` на точной embedded-сборке и оставить UI в состоянии
-  «нет данных», если источник не зарегистрирован;
-- довести Wails build/release checklist и документацию provisioning, не добавляя
-  реальные credentials в репозиторий;
-- подготовить детерминированный сценарий live acceptance, который после выдачи
-  доступа к VPS сводится к повторяемому набору команд и проверок.
+### 0.5. Рекомендуемый greenfield-стек
 
-Сознательно отложены до закрытия этих блокеров: mieru-адаптер, новые AWG/I1
-профили, zapret/byedpi, полноценный Windows TUN/service mode и iOS-перенос.
+До принятия альтернативы базовый стек такой:
 
----
+- **Windows:** Go + embedded pinned sing-box/libbox; Wails/Vue/TypeScript только
+  как UI boundary; domain policy и lifecycle без UI-зависимостей.
+- **Android:** Kotlin `VpnService`/foreground lifecycle + pinned libbox AAR;
+  Flutter/Dart для presentation и typed facade, pure domain logic в Dart/Kotlin
+  tests.
+- **iOS:** Swift `NetworkExtension` как native owner + shared signed metadata
+  contract; не притворяться, что Android/Linux APIs переносимы напрямую.
+- **Control-plane:** Cloudflare Worker/Pages/KV/D1 только для metadata, health и
+  opt-in telemetry; credentials — вне публичного plane.
+- **Provisioning/ops:** Python для read-only audit и явно разрешённых операций;
+  shell — только для локальных проверок; IaC/Ansible/Terraform вводить после
+  стабилизации контрактов и с dry-run.
+- **Contracts:** versioned JSON Schema/OpenAPI-подобные typed contracts,
+  Ed25519-signed metadata, redacted evidence JSON, SBOM и pinned dependencies.
+- **Testing:** Go/Dart/Kotlin unit tests, local deterministic harness,
+  integration tests с test servers, operator/device acceptance отдельно.
 
-## 1. Зафиксированные архитектурные решения
+Не добавлять второй VPN core только ради большего списка протоколов. Сначала
+доказать, что текущий core не покрывает требование; затем провести interop,
+license, binary-size, crash/lifecycle и security review.
 
-### 1.1. Один владелец выбора канала
+## 1. Журнал разработки
 
-**AdaptiveController владеет политикой выбора.**
+### 1.1. Запись 2026-08-26 — очистка greenfield
 
-sing-box выполняет выбранный канал через `selector`:
+| Поле | Решение |
+|---|---|
+| Статус | decision |
+| Цель | удалить старую реализацию и начать разработку с нуля |
+| References | внешние проекты вынесены в `references/` как ссылки и манифест |
+| Почему не клонируем всё | полные клоны создают шум и устаревают; локальная копия нужна только после выбора revision |
+| Ограничение | удаление файлов из рабочего дерева необратимо для незакоммиченных изменений; перед выполнением требуется явное подтверждение владельца |
+| Следующий шаг | после подтверждения удалить перечисленный legacy scope и оставить PLAN/служебные правила/references |
+
+| Дата | Статус | Компонент | Факт/решение | Доказательство | Следующий шаг |
+|---|---|---|---|---|---|
+| 2026-08-26 | done | План | Greenfield master-plan расширен строгими требованиями, серверным baseline, Cloudflare-порядком, закупками и evidence-gates | текущий `PLAN.md`, `node --check`, `git diff --check` | вести журнал в этом файле при каждом значимом этапе |
+| 2026-08-26 | decision | Источник правды | `PLAN.md` — единственный master-документ; остальные документы являются справочными и не могут переопределять этот план | это правило | синхронизировать устаревшие ссылки/статусы по мере затрагивания |
+| 2026-08-26 | decision | Процесс разработки | Перед новой реализацией сначала изучать готовые аналоги, лицензию, issues и benchmark; затем адаптировать или улучшать только по доказанной причине | reuse-first правило выше | применять к каждому новому компоненту |
+
+## 2. Цели, границы и определения
+
+### 0.1. Цель продукта
 
 ```text
-route.final → selector "proxy" → active outbound
-                         ↑
-                 AdaptiveController
+Пользователь нажимает Connect.
+Система проверяет доступный protected channel.
+Если канал подтверждён — трафик идёт через него.
+Если канал не подтверждён — система показывает причину и блокирует protected traffic.
+При отказе одного канала система выбирает другой validated channel.
 ```
 
-`urltest` не используется одновременно как второй владелец выбора в рабочем
-защищённом маршруте. Его можно оставить только для отдельной диагностики.
+### 0.2. Что не является целью
 
-Это устраняет конфликт:
+- гарантия работы при полном отключении международного трафика;
+- обещание обхода любого будущего DPI;
+- публикация credentials в Worker/KV/Pages;
+- автоматическое включение неподтверждённых протоколов;
+- использование прямого соединения как скрытого fallback;
+- маскировка ошибки под «подключено»;
+- сбор лишних персональных данных;
+- добавление чужого кода без license/security review.
 
-```text
-urltest выбрал A
-ChannelMemory предпочитает B
-AdaptiveEngine reload'ит C
-```
+### 0.3. Статусы доказательности
 
-### 1.2. Fail-closed по умолчанию
+| Статус | Значение |
+|---|---|
+| `planned` | идея или ссылка на внешнее решение |
+| `configured` | создана конфигурация, live path не доказан |
+| `locally-tested` | проверен код/стенд, но не операторская сеть |
+| `live-verified` | handshake + protected DNS + HTTPS подтверждены на tuple |
+| `degraded` | ранее работал, текущий результат хуже/неполон |
+| `blocked` | отказ воспроизведён в конкретной сети и профиле |
+| `retired` | отключён из-за риска, лицензии или плохого результата |
 
-```text
-явно разрешённые RU/private направления → direct
-защищённые направления → selector "proxy"
-нет рабочего канала → block
-```
-
-`direct` не входит в защищённый fallback. Если позже понадобится fail-open,
-это должна быть отдельная видимая настройка с предупреждением об утечке.
-
-### 1.3. Конфиг — источник истины
-
-Go не должен зашивать `grpc-nl`, `grpc-fr`, `vless-nl` и подобные имена.
-Каналы строятся из фактического состава конфигурации и описываются через:
+`live-verified` всегда привязан к tuple:
 
 ```text
-ChannelDescriptor:
-  id
-  tag
-  protocol
-  server
-  port
-  country
-  profile
-  enabled
-  priority
-```
-
-Если в текущем конфиге есть только Hysteria2 NL, UI должен показывать только
-доступные `Auto/NL`. Нельзя показывать FR и направлять его в несуществующий tag.
-
-### 1.4. Локальная память — собственная
-
-`ChannelMemory` хранит историю каналов и влияет на следующий выбор. На
-`cache_file` sing-box как на память выбора полагаться нельзя.
-
-Ключ памяти не содержит private key, password, UUID или Telegram token:
-
-```text
-channel-id + profile-id + endpoint-hash
-```
-
-### 1.5. Cloudflare — дополнительный сенсор, не источник истины
-
-Local probe и фактический traffic path имеют приоритет. Cloudflare health может
-подсказать, что VPS доступен извне, но не доказывает доступность из сети
-пользователя и не должен сам по себе запускать reload.
-
-### 1.6. Мобильные клиенты — после Windows
-
-Сначала стабилизируется модель канала, состояния, fail-closed и память на
-Windows. После этого Android/iOS получают общий формат конфигурации.
-
----
-
-## 2. Целевая архитектура
-
-```text
-┌──────────────────────────────────────────────────────────────────┐
-│ Vue/Wails UI                                                     │
-│ Start / Stop / Select / Diagnostics / Logs                       │
-└──────────────────────────────┬───────────────────────────────────┘
-                               │
-┌──────────────────────────────▼───────────────────────────────────┐
-│ Manager / LifecycleCoordinator                                   │
-│ единая сериализация Start, Stop, Reload, ApplyChannel            │
-└──────────────┬────────────────┬────────────────┬─────────────────┘
-               │                │                │
-               ▼                ▼                ▼
-        Embedded Engine   AdaptiveController   Metrics/Memory
-        box.Box           probes + CB           достоверные samples
-               │                │
-               ▼                │
-        sing-box selector ◄─────┘
-               │
-               ├─ Hysteria2 VPS
-               ├─ второй проверенный VPS/протокол
-               ├─ WARP/AWG или MASQUE после live validation
-               ├─ внешний mieru через localhost SOCKS (позже)
-               └─ block при отсутствии protected channel
+channel_id + core_version + profile_version + device + OS + operator/network +
+test_location + timestamp + handshake + protected_dns + protected_https + duration
 ```
 
 ---
 
-# Фаза 0. Безопасность и конфигурация — P0
+## 1. Фактчек и исходный baseline
 
-## 0.1. Секреты
+### 1.1. Что известно о текущей инфраструктуре
 
-- Перевыпустить Telegram token, если он когда-либо был опубликован.
-- Проверить UUID, Hysteria2/mieru passwords, WARP private keys и Cloudflare IDs.
-- Не отдавать private credentials через публичный `/api/config`.
-- Не коммитить реальные configs; для release использовать защищённый provisioning.
-- Добавить secret scanning в CI.
-- Не считать `.gitignore` защитой уже утёкшего секрета.
+- Cloudflare account существует и содержит зоны `snowden.dpdns.org` и
+  `snowden-vpn.us.kg`.
+- Обе зоны на последней проверке имели статус `pending`.
+- `snowden.dpdns.org` публично всё ещё делегирован на DigitalPlat, а не на
+  Cloudflare NS.
+- `snowden-vpn.us.kg` публично не резолвится.
+- Account-level Worker `snowden-system-api`, KV namespaces и D1 database
+  существуют; их наличие не доказывает рабочий CDN/VPN path.
+- Pages project существует, custom domain не подключён.
+- Старый VPS `89.125.1.217` имеет подтверждённый Hysteria2 UDP/8443 и старый
+  сертификат для `89-125-1-217.nip.io`.
+- Успешный HY2 handshake и protected HTTPS не подтверждены.
+- Документы о VLESS/TCP/443 расходятся; этот транспорт нельзя считать
+  существующим до новой проверки фактического runtime-конфига.
+- `snowden.live` исключён из актуальной схемы и не должен использоваться.
 
-## 0.2. Config validator
+### 1.2. Что подтверждено внешними источниками
 
-Добавить проверку перед embedded `box.New` и в CI:
+Использованы официальные документы и независимые полевые отчёты:
 
-- JSON syntax;
-- все `route`, `detour`, `selector`, `urltest` и DNS-ссылки существуют;
-- нет `YOUR_*` в release-конфиге;
-- есть `route.final`;
-- защищённые направления не имеют скрытого direct fallback;
-- build tags соответствуют используемым протоколам;
-- секреты не попадают в diagnostics/logs;
-- конфиг можно проверить на точном sing-box-lx build.
+- Cloudflare сообщал о российских resets/timeouts и throttling примерно до
+  16 KB для Cloudflare-protected соединений; это затрагивает TCP/TLS и QUIC.
+- Net4People/BBS issue #490 описывает freeze после примерно 15–20 KB, а также
+  SNI/CIDR allowlists и различия между операторами. Это field report, а не
+  универсальная константа.
+- 4PDA/NTC/GitHub reports показывают, что REALITY/VLESS работают
+  неравномерно: разные операторы и сети дают разные результаты.
+- Официальная документация Cloudflare подтверждает WebSockets, но также
+  connection/idle limits, необходимость keepalive/reconnect и закрытие
+  соединений при edge updates.
+- Cloudflare Spectrum — отдельный платный продукт для произвольного TCP/UDP;
+  обычный Free Website proxy не является raw UDP proxy.
+- Psiphon подтверждает ценность concurrent attempts, signed server entries,
+  tactics, out-of-band delivery и memory успешных способов.
+- Tor Snowflake/WebTunnel/obfs4 — зрелая pluggable-transport экосистема, но
+  это не drop-in replacement для обычного VPN.
+- AmneziaWG, Xray/REALITY и другие проекты полезны как open-source reference,
+  но их claims о «невидимости» не принимаются без собственной приёмки.
 
-Отдельно исправить `template-warp-awg.json`: DNS использует `detour: "proxy"`,
-но outbound с tag `proxy` отсутствует.
+### 1.3. Что исключено как мусор
 
-## 0.3. Config provisioning
+- проценты обнаружения без воспроизводимой методики;
+- «неотличим», «невозможно обнаружить», «оператор не может заблокировать CDN»;
+- один успешный комментарий как статистика всей страны;
+- generic tutorial без сети, даты, устройства и protected-traffic результата;
+- port-open, DNS-only, TLS-only, HTTP 404, `sing-box check` как доказательство
+  VPN.
 
-Оставить поток:
+---
+
+## 2. Строгие функциональные требования
+
+### FR-001. Protected routing
+
+1. Все направления делятся на:
+   - явно разрешённые direct private/RU направления;
+   - protected направления через selector;
+   - block/service rules.
+2. `direct` не входит в protected selector, fallback или recovery.
+3. При отсутствии validated channel protected traffic блокируется.
+4. UI не показывает `running` как доказательство внешнего доступа: внешний
+   probe имеет отдельное состояние.
+
+### FR-002. Channel registry
+
+Каждый канал обязан иметь descriptor:
 
 ```text
-configs/singbox/
-  → configs/sync-to-windows.sh
-  → windows/assets/configs/
+id
+transport/core
+server reference
+port
+hostname/SNI reference
+profile version
+capabilities
+failure domain
+credential reference (never credential value)
+enabled
+status
+last verified tuple
 ```
 
-Но release должен явно проверять наличие реального runtime-конфига. Чистый
-checkout не должен считаться рабочим без безопасного provisioning.
+В UI попадают только enabled channels, реально присутствующие в runtime и
+прошедшие validation. Никаких hardcoded стран, серверов и протоколов.
 
-## 0.4. Документация
+### FR-003. Transport adapter
 
-После исправлений обновить:
-
-- корневой `STRUCTURE.md` — embedded вместо subprocess;
-- `configs/singbox/STRUCTURE.md` — фактический состав каналов;
-- `configs/templates/README.md` — не обещать VLESS, если runtime использует HY2;
-- Windows documentation — не обещать Clash API/AWG/Gecko без live-приёмки.
-
-### Приёмка Фазы 0
+Каждый внешний core реализует:
 
 ```text
-node --check configs/cloudflare/worker.js
-конфиг без placeholder проходит validator
-публичный API не выдаёт private credentials
-sing-box check/embedded validation проходит на release-конфиге
+ValidateProfile
+Capabilities
+Start
+Stop
+Reload
+ProbeProtected
+Diagnostics
+RedactError
+```
+
+В production допускается только adapter, прошедший license review,
+reproducible build, lifecycle tests и live acceptance.
+
+### FR-004. Probe
+
+Probe обязан подтверждать:
+
+```text
+channel selected
+protected DNS resolved
+HTTPS target returned expected status
+traffic did not use direct fallback
+```
+
+Обычный host HTTPS без доказательства маршрута не принимается. Для каждого
+канала нужны минимум два HTTPS target и DNS target, чтобы не спутать captive
+portal или частичный доступ с VPN.
+
+### FR-005. Failover
+
+- одновременно выполняется не более одного recovery/reload;
+- канал A считается failed после двух подтверждённых protected failures;
+- HalfOpen требует двух успешных protected probes;
+- если все каналы failed — `BLOCKED`, не direct;
+- событие failover записывает только безопасный channel id, category и latency.
+
+### FR-006. Credential security
+
+- credentials вводятся через локальный provisioning;
+- публичные metadata endpoints credentials не возвращают;
+- credentials не попадают в logs, diagnostics, crash reports, tests и snapshots;
+- leaked credentials немедленно считаются скомпрометированными и перевыпускаются;
+- server entries подписываются или проверяются pinning/public key;
+- обновление конфигурации имеет version, expiry, rollback и anti-downgrade.
+
+### FR-007. Offline/blocked control-plane
+
+Клиент обязан иметь:
+
+```text
+last-known-good signed metadata
+несколько metadata delivery endpoints
+ручной QR/file import
+проверку срока и подписи
+rollback
+```
+
+Нельзя обещать автоматическое восстановление, если одновременно заблокированы
+все tunnel и все каналы доставки профиля.
+
+### FR-008. Lifecycle
+
+Windows:
+
+```text
+Start → validate → Engine.Start → protected probe → running/blocked
+Reload → validate → serialized Engine.Reload → probe
+Stop → stop adaptive/metrics → Engine.Close → clear proxy
+```
+
+Android:
+
+```text
+permission → foreground → libbox setup → command server → TUN → protected probe
+→ running или fail-closed cleanup
+```
+
+Все операции имеют bounded timeout, panic/error boundary и единый cleanup path.
+
+---
+
+## 3. Целевая архитектура каналов
+
+### 3.1. Минимально необходимая diversity
+
+```text
+Channel A — VLESS + WebSocket + TLS через CDN → VPS-1
+Channel B — VLESS + REALITY/XHTTP → VPS-2, другой provider/ASN
+Channel C — HY2/TUIC или другой UDP transport → VPS-3/другая сеть
+Channel D — отдельный emergency PT/backend после отдельного review
+```
+
+Два порта на одном VPS не считаются независимыми. Два домена на одном IP не
+считаются полным failover.
+
+### 3.2. Приоритет реализации
+
+1. **A: VLESS+WS через CDN** — против прямой блокировки origin IP. Нужны
+   активная зона, корректная DNS delegation, origin и live test.
+2. **B: REALITY/XHTTP reference** — против зависимости от CDN/домена. Нужен
+   другой failure domain; не считать невидимым.
+3. **C: HY2/TUIC** — как быстрый канал там, где UDP доступен. Не решает UDP/IP
+   block и не проходит через обычный Cloudflare proxy.
+4. **D: Psiphon/Tor PT** — отдельная экспериментальная ветка. Использовать
+   идеи Psiphon для discovery/tactics/memory, но не смешивать разные trust и
+   privacy модели без отдельного дизайна.
+5. **AmneziaWG** — только после проверки точного server/client runtime.
+6. **Samizdat** — research-only до независимого security/performance review.
+
+### 3.3. Core strategy
+
+Основной runtime остаётся `sing-box/libbox`, потому что проект уже строится
+вокруг embedded TUN и lifecycle. Xray не встраивается вторым core без
+необходимости: сначала interop adapter или supervised external process.
+
+Любая новая зависимость фиксируется:
+
+```text
+repository
+commit/tag
+license
+SBOM
+build recipe
+security advisories
+supported platforms
+known limitations
 ```
 
 ---
 
-# Фаза 1. Lifecycle embedded engine — P0
+## 4. Что купить/получить до разработки
 
-## 1.1. Engine
+### 4.1. Обязательное
 
-Закончить единый `startLocked()`:
+#### Инфраструктура
 
-- общий путь Start и Reload;
-- panic recovery;
-- гарантированный `StateError`;
-- bounded start timeout;
-- корректное закрытие экземпляра после timeout;
-- `Wait()` завершается после `Running` и после `Error`;
-- Reload не публикует промежуточный `Stopped`;
-- не удалять `cache.db` безусловно на каждом старте;
-- не оставлять бесконтрольную goroutine с `instance.Start()`.
+- **VPS-1** — текущий сервер можно использовать только после свежего baseline.
+- **VPS-2** — другой provider и ASN, отдельная география или сеть для REALITY.
+- **VPS-3** — желательно другой provider/ASN для UDP/HY2/TUIC или третьего
+  TCP transport.
+- минимум IPv4 на каждом VPS;
+- IPv6 — желательно, но не включать в production profile до проверки;
+- root/SSH access с host-key verification;
+- provider firewall/security-group management;
+- snapshots/backups и возможность быстро заменить IP;
+- SLA и billing, позволяющие заменить VPS при блокировке IP.
 
-Тесты:
+#### Домены и DNS
 
-- битый JSON;
-- panic из фабрики/старта;
-- timeout;
-- успешный Start + Wait;
-- Reload после Error;
-- Close во время Reload.
+- одна основная доменная зона под CDN;
+- минимум 2–4 резервные доменные зоны у разных регистраторов или DNS-провайдеров;
+- доступ к registrar NS delegation;
+- DNSSEC — включать только после проверки registrar/Cloudflare compatibility;
+- не использовать домен, где DNS нельзя оперативно изменить;
+- не публиковать origin IP в публичных metadata и клиентских профилях.
 
-## 1.2. Manager metrics worker
+#### Устройства и сети
 
-Использовать один управляемый worker на весь жизненный цикл Manager:
+- текущий Android Honor/Android 16;
+- второй Android OEM;
+- Windows 10/11 машина;
+- SIM MegaFon;
+- SIM минимум другого мобильного оператора;
+- независимый домашний Wi‑Fi;
+- возможность измерять IPv4-only и IPv6-capable сети;
+- безопасный тестовый endpoint/HTTP 204 target.
 
-```text
-Manager.Start → start worker один раз
-Manager.Reload → обновить snapshot/счётчики
-Manager.Stop → cancel + WaitGroup.Wait
-```
+### 4.2. Доступы и credentials
 
-Не запускать новый worker при каждом Reload. Проверить `WaitGroup` под
-параллельными Start/Reload/Stop.
-
-## 1.3. Единый lifecycle API
-
-AdaptiveController не вызывает `Engine.Reload()` напрямую. Он вызывает Manager:
-
-```text
-ApplyChannel(channelID)
-ReloadConfig(snapshot)
-ReportHealth(result)
-```
-
-Все вызовы из UI, Telegram и adaptive loop проходят через один сериализованный
-контур.
-
-## 1.4. Shutdown и proxy
-
-При shutdown:
+Нужно получить и хранить локально, не в Git:
 
 ```text
-Adaptive.Stop()
-Manager.StopVPN()
-Engine.Close()
-clearSystemProxy()
+Cloudflare account access
+Zone DNS Read
+Zone Settings Read
+отдельный короткоживущий DNS write token
+registrar access
+SSH key/password для VPS
+provider console access
+server protocol credentials
+certificate/private keys
 ```
 
-При ошибке Start системный proxy не должен оставаться включённым.
+Origin private key, UUID, HY2/VLESS passwords и SSH credentials никогда не
+записываются в PLAN.md, чат, Worker KV или публичный API. Если ключ уже
+публиковался — сначала перевыпуск, потом настройка.
 
-### Приёмка Фазы 1
+### 4.3. Не покупать преждевременно
+
+До успешной приёмки A/B не нужны:
+
+- Cloudflare Spectrum;
+- десятки VPS;
+- десятки доменов;
+- платные панели «one click VPN»;
+- непроверенные anti-DPI подписки;
+- новый core ради списка протоколов;
+- expensive telemetry/analytics.
+
+Сначала доказать два независимых канала, затем масштабировать.
+
+---
+
+## 5. Информация и требования к текущему серверу
+
+### 5.1. Известный baseline
+
+```text
+IP                    89.125.1.217
+OS                    Linux (точная версия — повторно снять)
+sing-box              active/enabled по прошлому audit
+listener              Hysteria2 UDP 0.0.0.0:8443
+TLS                   старый SAN 89-125-1-217.nip.io
+firewall              UDP 8443 ранее разрешён
+TCP 443               документы противоречат друг другу
+nginx                 не подтверждён в последнем baseline
+VLESS+WS              не подтверждён
+VLESS+REALITY         не подтверждён
+client handshake      не принят
+protected HTTPS       не принят
+```
+
+### 5.2. Обязательный read-only audit перед изменениями
 
 ```bash
-cd windows
-go test -race ./backend/core/...
-go vet ./...
-go build -tags "with_awg,with_wireguard,with_utls,with_gvisor" ./...
+hostnamectl
+cat /etc/os-release
+sing-box version
+sing-box check -c /etc/sing-box/config.json
+systemctl is-active sing-box
+systemctl is-enabled sing-box
+ss -ltnup
+ufw status verbose
+nft list ruleset
+journalctl -u sing-box --since "30 minutes ago" --no-pager
+openssl x509 -in <cert> -noout -subject -issuer -dates -ext subjectAltName
 ```
 
-Результат: нет зависшего `Starting`, нет утечки metrics goroutines, нет race.
+Сохранить только redacted metadata. Не копировать runtime config, private key,
+UUID или passwords в репозиторий.
+
+### 5.3. Безопасная миграция VPS-1
+
+Нельзя вслепую перезаписывать текущий runtime. Порядок:
+
+1. backup с проверкой восстановления;
+2. снять baseline и сохранить hash только metadata-safe файлов;
+3. выбрать владельца TCP/443: nginx или sing-box, не оба;
+4. настроить отдельный localhost VLESS+WS backend;
+5. установить корректный сертификат выбранного hostname;
+6. проверить `sing-box check` и `nginx -t`;
+7. открыть только необходимые порты;
+8. выполнить controlled reload, не restart без необходимости;
+9. проверить server logs во время реального клиента;
+10. rollback при ухудшении.
+
+Изменения сервера выполняются только после отдельного явного разрешения. Этот
+план сам по себе не является разрешением на SSH, deploy, restart или DNS write.
 
 ---
 
-# Фаза 2. Controller, selector и безопасная маршрутизация — P0
+## 6. Cloudflare: идеальная настройка по шагам
 
-## 2.1. ChannelDescriptor и capabilities
+### 6.1. Выбор зоны
 
-Добавить получение списка каналов из фактического конфига. Для country mapping
-использовать явные metadata/manifest; substring tag допустим только как
-временный fallback и только при однозначном результате.
+Выбрать одну зону как primary. Текущий рекомендуемый кандидат —
+`snowden.dpdns.org`, но только если DigitalPlat позволяет изменить NS.
+`snowden-vpn.us.kg` оставить резервом до появления публичной делегации.
 
-Неизвестный/отсутствующий канал должен давать понятную ошибку или быть скрыт в
-UI, а не silently fallback в `auto`.
+### 6.2. Порядок DNS delegation
 
-## 2.2. Рабочий selector
+1. В Cloudflare убедиться, что zone создана в нужном account.
+2. На registrar заменить authoritative NS на выданные Cloudflare NS.
+3. Дождаться обновления parent delegation.
+4. Проверить NS минимум через несколько независимых резолверов.
+5. Дождаться `active` в Cloudflare.
+6. Только после `active` создавать/проверять production DNS records.
 
-Защищённый маршрут должен использовать:
+### 6.3. DNS records
 
-```text
-selector "proxy"
-```
-
-В selector входят только validated protected channels. `direct` не входит.
-Если selector не имеет рабочего канала, применяется `block`.
-
-`SelectServer("auto")` означает выбор политики AdaptiveController, а не
-передачу управления `urltest`.
-
-## 2.3. Исправить frontend/backend contract
-
-Проверить и исправить:
-
-- `running/starting/stopped/error` против `connected/connecting`;
-- отображение фактически выбранного outbound;
-- динамический список стран/каналов;
-- индексы RoutingCard после фильтрации служебных правил;
-- применение импортированного конфига;
-- hardcoded VLESS/Hysteria labels;
-- отсутствие fake active server.
-
-### Приёмка Фазы 2
+Для CDN-канала:
 
 ```text
-Auto/NL/доступные каналы работают по фактическому конфигу
-несуществующий tag невозможно выбрать
-protected traffic не переходит в direct незаметно
-в UI отображается реальный active channel
+A @    → origin IPv4, Proxied
+A www  → origin IPv4, Proxied (только если нужен web alias)
+AAAA   → не создавать, пока IPv6 не настроен и не протестирован
 ```
+
+Не публиковать `nip.io` как SNI для нового домена. Не делать DNS-only запись
+для клиентского CDN endpoint. Origin IP всё равно нужно считать скомпрометированным,
+если он уже был опубликован: CDN не возвращает прошлую конфиденциальность.
+
+### 6.4. SSL/TLS
+
+- client → Cloudflare: Full (strict) после проверки origin certificate;
+- origin certificate SAN должен содержать exact chosen hostname;
+- TLS 1.2/1.3 с безопасными defaults;
+- не использовать `insecure` в production;
+- проверить certificate renewal и rollback;
+- origin cert private key не помещать в KV/Worker/репозиторий.
+
+### 6.5. WebSocket
+
+- включить WebSockets;
+- backend path согласовать в одном manifest;
+- добавить heartbeat/ping и reconnect;
+- не считать HTTP 404 без Upgrade ошибкой VLESS;
+- не считать Upgrade 101 без VLESS auth и protected HTTPS успехом;
+- учитывать Cloudflare connection/idle limits;
+- тестировать длительность и edge reconnect.
+
+### 6.6. Cloudflare API/Worker
+
+Требования к токенам:
+
+```text
+read token: Zone DNS Read + Zone Settings Read
+write token: отдельный, короткоживущий, только DNS edit
+worker deploy token: отдельный и не используется приложением
+```
+
+Worker:
+
+- health — только дополнительный signal;
+- `/api/config` — metadata-only, schema/version/signature;
+- credentials — только authenticated/local provisioning;
+- telemetry — opt-in, rate-limited, без IP/UUID/password;
+- KV/D1 bindings проверяются contract tests;
+- endpoint A/B/C имеют разные failure domains;
+- Worker не выбирает канал и не запускает `ReloadVPN` сам.
+
+Публичный Worker health обязан различать:
+
+```text
+edge → origin TCP/HTTP
+edge → origin response
+client → protocol handshake
+client → protected DNS/HTTPS
+```
+
+Только последний уровень является VPN acceptance.
+
+### 6.7. Что Cloudflare не делает
+
+Обычный Free Website proxy не является:
+
+- HY2 UDP proxy;
+- raw TCP proxy для любого протокола;
+- гарантией обхода DPI;
+- защитой от блокировки домена;
+- защитой от блокировки Cloudflare traffic;
+- способом скрыть уже раскрытый origin IP.
+
+Raw TCP/UDP через Spectrum — отдельный платный продукт и не входит в текущую
+бесплатную схему.
 
 ---
 
-# Фаза 3. Быстрая детекция и Circuit Breaker — P0
+## 7. Серверные профили
 
-## 3.1. Категории
-
-Использовать проверяемые операционные категории:
+### Profile A — VLESS+WS+TLS через Cloudflare
 
 ```text
-NetworkDown
-DNSFailure
-ServerUnreachable
-TLSFailure
-ProtocolFailure
-ProtectedChannelUnavailable
-Degraded
-Unknown
-```
-
-«ТСПУ», «DPI» и «DME» — гипотезы объяснения, а не доказанный диагноз.
-
-## 3.2. Protected probe
-
-Probe обязан идти через активный selector channel. Успех прямого fallback не
-должен считаться успехом VPN.
-
-Использовать:
-
-- timeout 2–3 секунды;
-- два последовательных подтверждения отказа;
-- сброс Suspect после одного успешного probe;
-- при необходимости два независимых HTTP targets;
-- passive failure signals из логов только как триггер ускоренной проверки.
-
-## 3.3. Машина состояний
-
-```text
-Closed
-  └─ первый fail → Suspect
-       ├─ success → Closed
-       └─ второй fail → Open
-
-Open
-  └─ cooldown 10s/20s/40s/60s → HalfOpen
-
-HalfOpen
-  ├─ fail → Open + backoff
-  └─ 2 success → Closed + reset backoff
-```
-
-Для SLA обнаружения менее 10 секунд closed probe нельзя оставлять только раз в
-30 секунд. Использовать cadence около 5 секунд либо passive failure trigger.
-
-Recovery должен быть асинхронным, но сериализованным: одновременно выполняется
-не более одного reload/recovery operation.
-
-### Приёмка Фазы 3
-
-```text
-один сетевой blip не роняет туннель
-2 подтверждённых fail переводят канал в Open
-cooldown реально соблюдается
-HalfOpen → 2 success → Closed
-проверка не уходит в direct
-```
-
----
-
-# Фаза 4. Реальный транспортный пул — P1
-
-## 4.1. Базовая линия
-
-Сначала принять только реально работающий Hysteria2 VPS. Документированные
-placeholder VLESS/FR endpoints не считаются каналами до live-теста серверной
-части.
-
-## 4.2. Второй независимый канал
-
-Добавить минимум один реально проверенный независимый канал:
-
-- отдельный VPS/IP;
-- или отдельный серверный протокол;
-- с отдельным health result и channel ID.
-
-Приёмка: отключение первого канала приводит к выбору второго без direct leak.
-
-## 4.3. WARP/AWG
-
-Порядок работ:
-
-1. Provision WARP credentials безопасно и вне публичного KV.
-2. Проверить plain WireGuard endpoint как базовую связность.
-3. Проверить AWG на фактической Windows-сборке, включая совместимый runtime.
-4. Добавить один рабочий AWG profile.
-5. После этого добавить I1-A/I1-B/I1-C.
-6. Каждый профиль проверить handshake и реальным HTTP/HTTPS трафиком.
-7. В памяти хранить ID профиля, не private key.
-
-Нельзя считать AWG готовым только потому, что поля `jc/i1` есть в JSON.
-
-WARP является независимой точкой выхода, но не гарантирует страну/colo и не
-заменяет отдельные geo endpoints.
-
-## 4.4. I1-ротация
-
-Сначала должен работать один профиль. Затем:
-
-```text
-I1-A → I1-B → I1-C
-```
-
-Junk-параметры менять последними. Не использовать неподтверждённые blobs,
-которые не приняты конкретным AWG runtime/server.
-
-## 4.5. Mieru — поздний внешний адаптер
-
-Native outbound в sing-box не добавлять. Если mieru потребуется:
-
-```text
-supervised mieru/mita process
-  → localhost SOCKS
-  → sing-box socks outbound
-  → selector
-```
-
-Запуск Karing оставить пользовательской альтернативой, но не считать его
-частью автоматического failover.
-
-### Приёмка Фазы 4
-
-```text
-минимум два validated protected channels
-каждый имеет отдельный descriptor и health state
-selector выбирает только validated channels
-direct не входит в protected pool
-```
-
----
-
-# Фаза 5. ChannelMemory, метрики и domain intelligence — P1
-
-## 5.1. ChannelMemory
-
-Record должен получать фактически выбранный канал, а не просто первый outbound.
-
-Хранить:
-
-```text
-success/failure
-consecutive fail/ok
-EWMA latency
-last outcome
-cooldown
-profile/context id
+client → Cloudflare edge → nginx:443 → localhost VLESS+WS → internet
 ```
 
 Требования:
 
-- atomic save через temp + rename;
-- schema version;
-- debounce записи;
-- cap/LRU;
-- обработка повреждённого файла;
-- prune несуществующих каналов;
-- отсутствие секретов в key;
-- score влияет на следующий выбор;
-- unknown channel получает ограниченное exploration preference.
+- primary zone active;
+- proxied A record;
+- exact certificate/SNI;
+- nginx owns 443;
+- sing-box owns localhost backend;
+- exact WS path;
+- VLESS UUID provisioned securely;
+- no direct origin fallback;
+- client protected DNS/HTTPS passes.
 
-Текущий `ChannelMemory.Best()` без интеграции в controller не считается
-реализованной адаптивностью.
-
-## 5.2. Метрики
-
-Не полагаться на необъявленный `127.0.0.1:9090`.
-
-Сделать `TrafficSource` интерфейс и отдельно проверить на pinned build:
-
-- включение `experimental.clash_api`;
-- build tag `with_clash_api`;
-- authentication;
-- `/connections`/traffic semantics;
-- работу на Windows embedded box.
-
-Если источник недоступен, UI показывает `нет данных`, а не ложные `0 B/s`.
-
-## 5.3. DomainStats
-
-Sniff log доказывает только обнаружение домена. Он не доказывает успех,
-latency или фактический outbound.
-
-Сначала подключить реальные detour/connection samples. До этого `DomainStats`
-остаётся диагностическим журналом и не меняет маршрутизацию.
-
-`GetBest(domain)` подключать только после появления достоверных samples и
-механизма применения выбора без reload на каждый запрос.
-
-### Приёмка Фазы 5
+### Profile B — VLESS+REALITY/XHTTP
 
 ```text
-падший канал не выбирается первым после рестарта
-memory file переживает restart
-Diagnostics показывает active/best channel и memory summary
-TrafficCard не врёт нулевыми значениями
-DomainStats не называет sniff событие успешным запросом
+client → VPS-2:443 → REALITY/XHTTP → internet
+```
+
+Требования:
+
+- VPS-2 different provider/ASN;
+- fresh keys/UUID/short-id;
+- target reachable from test network;
+- pinned Xray/sing-box revision;
+- active probe behaviour checked;
+- protected DNS/HTTPS passes;
+- no claim of invisibility.
+
+### Profile C — HY2/TUIC
+
+```text
+client → independent UDP endpoint → internet
+```
+
+Требования:
+
+- UDP handshake observed;
+- firewall/provider UDP verified;
+- certificate/SNI/password match;
+- protected DNS/HTTPS passes;
+- known operator-specific UDP result recorded.
+
+### Profile D — emergency backend
+
+Psiphon/Tor PT/Snowflake/WebTunnel/obfs4/AmneziaWG рассматриваются только
+как отдельные adapters. Они не попадают в основной selector до всех gates:
+
+```text
+license
+security
+reproducible build
+lifecycle
+protected traffic
+privacy model
+performance
+operator matrix
 ```
 
 ---
 
-# Фаза 6. Cloudflare, динамические конфиги и telemetry — P1/P2
+## 8. Канал D: аварийные транспорты
 
-## 6.1. Worker
+Канал D **включён в план**, но не включён в первый production MVP. Это не
+означает, что перечисленные решения хуже. Они решают другие задачи и имеют
+другую цену интеграции:
 
-Исправить:
+| Решение | Сильная сторона | Причина отдельного этапа |
+|---|---|---|
+| Psiphon | зрелые discovery, tactics, obfuscated transports и memory | отдельный runtime, серверная экосистема и модель обновлений |
+| Tor Snowflake | динамические volunteer-relays, полезные при блокировке VPS | Tor не равен обычному VPN, выше latency и сложнее TUN-интеграция |
+| WebTunnel | Tor-трафик выглядит как HTTPS через веб-сервер | нужны совместимые bridge/relay и отдельная Tor-интеграция |
+| obfs4 | хорошая защита от простого распознавания bridge-трафика | нужны distribution bridges и самостоятельная эксплуатация |
+| AmneziaWG | обфускация WireGuard-трафика | нужна точная совместимая пара client/server; нет универсальной гарантии |
+| Другие PT | могут помочь против конкретного DPI/оператора | нужно подтвердить лицензию, безопасность, lifecycle и эффективность |
 
-- синтаксис `worker.js`;
-- чтение `env.VPS_IP`/секретов через bindings;
-- передачу `request` в health-check;
-- отсутствие ложного обещания multi-edge checks;
-- фактический PUT/auth flow только если он нужен;
-- rate limit и schema validation;
-- разделение публичных metadata и приватных credentials;
-- ограничение CORS;
-- telemetry abuse protection.
-
-## 6.2. Windows integration
-
-`FetchConfig()` должен реально вызываться в startup/update flow, но только после
-валидации и безопасной схемы. Remote config не должен silently заменять
-последний рабочий конфиг.
-
-## 6.3. Health и telemetry
-
-Remote health — дополнительный signal:
+Это не «плохие запасные протоколы», а отдельный аварийный слой. До прохождения
+самостоятельного evidence gate решение получает статус `planned` или
+`experimental` и не попадает в protected selector:
 
 ```text
-local probe fail + remote VPS alive → вероятен локальный barrier
-local probe fail + remote VPS dead → вероятен server failure
+license/security review
+reproducible build
+server/client interoperability
+Android/Windows lifecycle
+protected DNS + two HTTPS targets
+no direct fallback
+privacy review
+CPU/memory/latency benchmark
+operator/network matrix
+safe update and revocation
 ```
 
-Это не абсолютное доказательство и не единственная причина reload.
+После прохождения gate оно становится обычным `validated channel` и участвует в
+failover на тех же правилах, что A/B/C. Сначала реализуем reusable discovery,
+tactics и memory по мотивам Psiphon, затем выбираем один PT по измеренной
+пользе; остальные не добавляем ради количества.
 
-Telemetry — opt-in, без credentials/UUID/IP, с ограничением частоты.
+## 9. Control-plane, discovery и ротация
 
-## 6.4. Version/release
+### 8.1. Signed metadata
 
-Сделать один источник версии и rollback last-known-good config. Сейчас версии
-landing/Worker/R2 расходятся.
+Metadata envelope:
+
+```text
+schema_version
+metadata_version
+issued_at
+expires_at
+key_id
+signature
+channels[]
+capabilities
+revocations
+```
+
+Внутри channel metadata нет:
+
+```text
+password
+UUID
+private key
+SSH credential
+Cloudflare token
+```
+
+Клиент проверяет подпись, срок, monotonic version и capabilities до применения.
+
+### 8.2. Delivery hierarchy
+
+```text
+A: primary Worker
+B: Pages/static metadata
+C: second Worker/domain
+D: embedded last-known-good
+E: manual QR/file import
+```
+
+Каждый endpoint проверяется отдельно и не считается рабочим до signature +
+profile validation.
+
+### 8.3. Rotation policy
+
+При отказе:
+
+1. записать безопасную категорию;
+2. прекратить retries на cooldown;
+3. попробовать только другой validated failure domain;
+4. не менять credentials автоматически без authenticated update;
+5. при domain block использовать другой metadata endpoint;
+6. если delivery заблокирован — показать manual import, не direct fallback.
 
 ---
 
-# Фаза 7. Android и iOS — P2
+## 9. Локальная разработка и тестовый стенд
 
-После стабилизации Windows-контракта:
+### 9.1. Разрешено до рабочего сервера
 
-1. Зафиксировать общий `ChannelDescriptor`/config schema.
-2. Подтвердить Android-смартфонный тестовый контур через ADB.
-3. Выбрать одну iOS-реализацию; вторую заморозить или удалить.
-4. Проверить актуальность `libbox.aar` и PlatformInterface.
-5. Перенести selector/fail-closed/diagnostics, не копируя Windows-specific code.
-6. Добавить mobile-specific lifecycle: foreground service, Network Extension,
-   permissions, sleep/resume, battery.
+- transport adapter interfaces;
+- fake protected channels;
+- local TLS/HTTP/WS integration server;
+- deterministic DNS/TLS/probe tests;
+- config signing/verification;
+- circuit breaker and memory;
+- Worker mock KV/D1 tests;
+- Android/Windows lifecycle;
+- synthetic throttling/freeze/reset tests;
+- no-secret logging tests;
+- SBOM/license checker.
 
-Android/iOS не входят в критерий Windows MVP.
+### 9.2. Обязательный local harness
 
----
+Harness должен уметь имитировать:
 
-## 3. Что сознательно не входит в MVP
+```text
+success
+DNS failure
+TLS mismatch
+auth failure
+TCP timeout
+UDP unavailable
+server accepts then freezes after threshold
+Cloudflare-style edge reset
+origin unavailable
+stale metadata
+invalid signature
+expired metadata
+all channels unavailable
+```
 
-- zapret/byedpi/WinDivert;
-- WDTT/VK media relay;
-- собственный WARP relay;
-- белые списки операторов;
-- llimonix как runtime dependency;
-- гарантированный geo через WARP;
-- Hysteria2 Gecko в sing-box-lx без отдельной проверки;
-- полноценный Windows TUN/service mode;
-- автоматический Karing/mieru failover.
+Он проверяет:
 
-`nip.io + Let's Encrypt` остаётся полезным способом получения настоящего TLS
-certificate для серверной инфраструктуры, но не является отдельным adaptive
-controller и не должен блокировать lifecycle MVP.
+```text
+no direct leak
+correct classification
+serialized failover
+cleanup
+UI unavailable/error state
+rollback
+```
 
----
+### 9.3. Build/test gates
 
-# 4. Проверки и команды
+Windows:
 
-## Локальная Windows-проверка
+```bash
+go test ./...
+go vet ./...
+go test -race ./...
+go build -tags "with_awg,with_wireguard,with_utls,with_gvisor" ./...
+```
+
+Frontend:
+
+```bash
+npm ci
+npm run build
+```
+
+Android:
+
+```bash
+flutter analyze
+flutter test
+./gradlew :app:compileReleaseKotlin --no-daemon
+flutter build apk --release --dart-define-from-file=config.local.json
+```
+
+Cloudflare:
 
 ```bash
 node --check configs/cloudflare/worker.js
-
-cd windows/frontend
-npm ci
-npm run build
-
-cd ..
-go test -race ./backend/core/...
-go vet ./...
-go build -tags "with_awg,with_wireguard,with_utls,with_gvisor" ./...
-
-# Полная Wails-сборка
-wails build -skipbindings -s -tags "with_awg,with_wireguard,with_utls,with_gvisor"
+Worker contract tests with mocked KV/D1
 ```
 
-## Конфигурация
-
-```bash
-bash configs/sync-to-windows.sh
-# затем validator и sing-box check на точной pinned-сборке
-```
-
-## Live acceptance
-
-1. Start с рабочим config.
-2. Проверить RU/private direct policy.
-3. Проверить protected HTTP/HTTPS через active channel.
-4. Зафиксировать active channel в diagnostics.
-5. Имитировать отказ первого канала.
-6. Убедиться в переключении на второй validated channel.
-7. Убедиться, что direct не используется незаметно.
-8. Выполнить несколько Reload подряд.
-9. Проверить отсутствие роста goroutines.
-10. Перезапустить приложение и проверить memory-based ordering.
-11. Проверить ADB Android только после Windows acceptance.
+Generated bindings не редактировать вручную.
 
 ---
 
-# 5. Финальный критерий Windows MVP
+## 10. Live acceptance matrix
 
-Система считается готовой, когда:
+### Networks
 
-1. release-конфиг валиден и не содержит placeholder;
-2. Start/Reload/Stop не оставляют зависших box/goroutines;
-3. `Wait()` корректен после success и error;
-4. `go test -race` и `go vet` проходят;
-5. AdaptiveController — единственный владелец выбора;
-6. protected traffic использует selector и fail-closed;
-7. обрыв обнаруживается в согласованный SLA;
-8. Circuit Breaker реально проходит cooldown/HalfOpen/Closed;
-9. есть минимум два реально проверенных protected channels;
-10. active channel точно виден в UI/Diagnostics;
-11. ChannelMemory меняет следующий выбор и переживает restart;
-12. TrafficCard не показывает выдуманные нулевые метрики;
-13. Cloudflare Worker синтаксически и функционально проверен;
-14. публичные endpoints не выдают private credentials;
-15. frontend/Go/Wails release build зелёные.
+- домашний Wi‑Fi;
+- MegaFon LTE;
+- второй мобильный оператор;
+- IPv4-only;
+- IPv6-capable;
+- нестабильная сеть/captive portal.
 
-> «Работает при любых блокировках» не является технически гарантируемым
-> утверждением. IP/ASN block требует нового endpoint, whitelist-режим требует
-> отдельной техники, geo-block требует отдельного выхода, а конкретный DPI
-> требует live-профилей. Этот план делает эти классы отказов наблюдаемыми и
-> управляемыми, а не обещает невозможную универсальность.
+### Devices
+
+- PTP N49 / Android 16;
+- второй Android OEM;
+- Windows 10;
+- Windows 11;
+- sleep/resume;
+- Wi‑Fi ↔ LTE handover.
+
+### Per-channel checks
+
+```text
+[ ] DNS/profile metadata valid
+[ ] listener observed server-side
+[ ] protocol handshake observed
+[ ] protected DNS success
+[ ] HTTPS target 1 success
+[ ] HTTPS target 2 success
+[ ] egress is expected
+[ ] no direct fallback
+[ ] 30-minute stability
+[ ] edge/server reconnect
+[ ] stop cleanup
+[ ] repeated start/stop
+```
+
+### Failover checks
+
+```text
+[ ] A and B independently live-verified
+[ ] A intentionally disabled
+[ ] B selected
+[ ] B protected DNS/HTTPS succeeds
+[ ] direct never selected
+[ ] A cooldown respected
+[ ] A recovery requires protected success
+[ ] all channels failure becomes blocked
+```
+
+### Evidence artifact
+
+На каждый тест сохранять redacted JSON:
+
+```text
+channel_id
+profile_version
+core_version
+network/operator label
+OS/device class
+timestamp
+handshake result
+DNS result
+HTTP statuses
+latency buckets
+duration
+failure category
+```
+
+Не сохранять IP пользователя, credentials, UUID, private keys или сырые логи с
+секретами.
+
+---
+
+## 11. Порядок реализации greenfield
+
+### Phase 0 — freeze requirements
+
+- утвердить threat model;
+- выбрать platforms;
+- выбрать primary domain;
+- получить server/registrar/Cloudflare access;
+- rotate exposed credentials;
+- зафиксировать license policy;
+- создать metadata schema.
+
+**Gate:** никаких неизвестных владельцев данных и credentials.
+
+### Phase 1 — core safety
+
+- config validator;
+- signed metadata;
+- channel descriptors;
+- fail-closed selector;
+- lifecycle manager;
+- local probe;
+- no-secret diagnostics;
+- local harness.
+
+**Gate:** все unit/integration tests pass; no direct protected fallback.
+
+### Phase 2 — VPS-1 baseline and HY2
+
+- fresh read-only audit;
+- backup/restore rehearsal;
+- HY2 profile validation;
+- Android/Windows protected probe;
+- classify current operator result.
+
+**Gate:** HY2 `live-verified` хотя бы в одной сети или честно `blocked`.
+
+### Phase 3 — Cloudflare CDN channel A
+
+- registrar NS delegation;
+- zone active;
+- DNS records/proxy/settings;
+- origin certificate;
+- nginx + localhost VLESS+WS;
+- exact client profile;
+- protected DNS/HTTPS tests.
+
+**Gate:** A live-verified на Wi‑Fi и минимум одном мобильном операторе.
+
+### Phase 4 — independent channel B
+
+- provision VPS-2 другой failure domain;
+- REALITY/XHTTP reference/adapter;
+- server/client interop;
+- protected acceptance;
+- failure simulation.
+
+**Gate:** B live-verified независимо от A.
+
+### Phase 5 — controller/failover
+
+- concurrent candidate attempts;
+- quality test;
+- memory successful tuple;
+- circuit breaker;
+- signed rotation;
+- serialized reload;
+- all-failed block.
+
+**Gate:** intentional A failure → B protected HTTPS без direct leak.
+
+### Phase 6 — third transport and emergency path
+
+- C HY2/TUIC on different failure domain;
+- optional AmneziaWG;
+- research adapters Psiphon/Tor PT/Samizdat only after review;
+- no automatic production inclusion before acceptance.
+
+**Gate:** each channel has independent evidence tuple.
+
+### Phase 7 — product hardening
+
+- Windows GUI acceptance;
+- Android OEM matrix;
+- certificate renewal;
+- credential rotation;
+- recovery from metadata endpoint loss;
+- observability;
+- support/runbooks;
+- release signing and SBOM.
+
+---
+
+## 12. Критерии готовности
+
+### Channel ready
+
+```text
+[ ] exact runtime config validated
+[ ] server listener observed
+[ ] protocol handshake observed
+[ ] protected DNS observed
+[ ] two protected HTTPS targets observed
+[ ] no direct fallback
+[ ] lifecycle cleanup verified
+[ ] device/network tuple recorded
+```
+
+### Production resilience ready
+
+```text
+[ ] at least two live-verified channels
+[ ] different failure domains
+[ ] tested in Wi‑Fi and mobile networks
+[ ] intentional channel failure switches correctly
+[ ] signed metadata rotation works
+[ ] at least two delivery paths work
+[ ] last-known-good rollback works
+[ ] all-failed state blocks traffic
+[ ] no credentials leaked
+[ ] metrics are honest/unavailable when source absent
+```
+
+### Security ready
+
+```text
+[ ] exposed credentials rotated
+[ ] least-privilege Cloudflare tokens
+[ ] SSH hardened
+[ ] origin IP exposure documented
+[ ] cert renewal tested
+[ ] dependency licenses/SBOM recorded
+[ ] Worker telemetry protected
+[ ] public config metadata signed and credential-free
+```
+
+---
+
+## 13. Финальный verdict
+
+Лучшее практически достижимое решение — не «самый скрытый протокол», а
+система diversity + evidence + delivery resilience:
+
+```text
+разные VPS/ASN
++ CDN channel
++ domainless channel
++ optional UDP channel
++ signed discovery
++ multiple delivery paths
++ concurrent attempts
++ success memory
++ protected probes
++ serialized failover
++ fail-closed
+```
+
+Даже такая система не гарантирует обход полного shutdown, блокировки всех
+Cloudflare IP/доменов, активного распознавания всех transports, блокировки
+приложения или одновременной блокировки tunnel и control-plane.
+
+Корректное публичное обещание:
+
+> «Система повышает устойчивость за счёт нескольких независимо проверенных
+> защищённых каналов, выбирает доступный канал по фактам и не допускает
+> незаметного прямого трафика. Поддержка подтверждается для конкретных сетей,
+> устройств, версий core и профилей».
+
+---
+
+## 14. Что делает агент, а что требует разрешения владельца
+
+### Агент может без отдельного инфраструктурного разрешения
+
+- читать репозиторий и публичную документацию;
+- выполнять локальные тесты и сборки;
+- делать read-only публичные DNS/HTTPS проверки;
+- готовить конфиги-шаблоны без credentials;
+- писать тесты, adapters и документацию;
+- готовить Cloudflare API dry-run и отчёт.
+
+### Нужно отдельное явное разрешение
+
+- изменение Cloudflare DNS/NS/settings;
+- создание/удаление Worker, KV, D1, Pages resources;
+- deploy/rollback Worker;
+- SSH на VPS с изменением файлов;
+- `systemctl restart/reload`;
+- firewall/security-group changes;
+- выпуск/отзыв сертификатов;
+- покупка VPS/доменов/услуг;
+- публикация APK/EXE или рассылка credentials.
+
+До получения разрешения любые операции Cloudflare выполняются только в
+read-only/dry-run режиме. Возможность технически использовать локальный OAuth
+не является разрешением на write.

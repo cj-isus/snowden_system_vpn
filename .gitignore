@@ -1,66 +1,8 @@
-# ─────────────────────────────────────────────────────────────
-# snowden.system — .gitignore
-# В репозиторий попадают ТОЛЬКО шаблоны (.example) и исходники.
-# Реальные ключи/IP/токены/конфиги с серверами — НЕ пушить.
-# ─────────────────────────────────────────────────────────────
-
-# ── Генерация / сборка ──────────────────────────────────────
-node_modules/
-dist/
-build/bin/
-*.exe
-*.dll
-*.apk
-*.log
-*.db
-*.zip
-*.rar
-*~
-.DS_Store
-Thumbs.db
-
-# FLutter/Dart
-.dart_tool/
-.gradle/
-*.iml
-.idea/
-android/android/local.properties
-
-# ── СЕКРЕТЫ: env ────────────────────────────────────────────
-configs/env/.env
-windows/.env
-
-# ── СЕКРЕТЫ: sing-box конфиги с серверами/ключами ───────────
-configs/singbox/server-params.json
-configs/singbox/server2-params.json
-configs/singbox/warp-keys.json
-configs/singbox/warp-outbound.json
-configs/singbox/warp2.json
-configs/singbox/warp-amnezia-vpn.conf
-configs/singbox/template-vps-reality.json
-configs/singbox/test-reality-20810.json
-configs/singbox/mieru-credentials.json
-configs/singbox/mieru-fr-credentials.json
-
-# ── СЕКРЕТЫ: Cloudflare (реальные ID/токены) ───────────────
-configs/cloudflare/wrangler.toml
-configs/cloudflare/r2-wrangler.toml
-
-# ── СЕКРЕТЫ: лендинг/раздача (реальные IP и конфиги) ────────
-configs/landing/version.json
-configs/landing/snowden-amnezia.conf
-configs/landing/snowden-mieru.json
-configs/landing/snowden-ios-config.json
-configs/landing/snowden-android-singbox.json
-configs/landing/snowden-portable.zip
-
-# ── Рабочие копии конфигов приложения (источник — configs/) ─
-windows/assets/configs/
-
-# ── Локальные данные ────────────────────────────────────────
-docs/assets/
-scripts/server/
-# Local runtime / build artifacts
-__pycache__/
-*.pyc
+# Freebuff local workspace metadata
 .freebuff/
+
+# Local credentials and generated artifacts
+configs/env/.env
+android/config.local.json
+windows/frontend/node_modules/
+windows/frontend/dist/

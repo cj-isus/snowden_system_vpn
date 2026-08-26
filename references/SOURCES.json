@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "policy": "Links are references only; no source is production-approved automatically.",
+  "review_required": ["license", "security", "pinned_revision", "interop", "lifecycle", "protected_probe", "performance"],
+  "projects": [
+    {"id":"sing-box","url":"https://github.com/SagerNet/sing-box","license":"GPL-3.0","role":"embedded runtime and transports"},
+    {"id":"sing-box-for-android","url":"https://github.com/SagerNet/sing-box-for-android","license":"GPL-3.0","role":"Android libbox/VpnService reference"},
+    {"id":"xray-core","url":"https://github.com/XTLS/Xray-core","license":"MPL-2.0","role":"VLESS/REALITY interoperability reference"},
+    {"id":"psiphon-tunnel-core","url":"https://github.com/Psiphon-Labs/psiphon-tunnel-core","license":"GPL-3.0","role":"discovery/tactics/memory reference"},
+    {"id":"tor-pluggable-transports","url":"https://gitlab.torproject.org/tpo/anti-censorship","license":"mixed","role":"Snowflake/WebTunnel/obfs4 research"},
+    {"id":"amneziawg-go","url":"https://github.com/amnezia-vpn/amneziawg-go","license":"GPL-2.0","role":"obfuscated WireGuard candidate"},
+    {"id":"lantern-samizdat","url":"https://github.com/getlantern/samizdat","license":"GPL-3.0","role":"research-only obfuscation reference"}
+  ]
+}
